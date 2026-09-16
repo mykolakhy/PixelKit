@@ -41,3 +41,7 @@ ImageMagick must be installed and available in `PATH` when running from source.
 - `outputs/PixelKit.ico` and `outputs/PixelKit.png` — application icons.
 
 For the complete source-build notes, see [`outputs/README.md`](outputs/README.md).
+
+## Security
+
+The `main` branch is protected and changes must go through a Pull Request with an approved review. Secret scanning, push protection, Dependabot alerts, automated security fixes, and private vulnerability reporting are enabled. See [`SECURITY.md`](SECURITY.md) for the vulnerability reporting policy.
