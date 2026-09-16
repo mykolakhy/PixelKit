@@ -38,7 +38,7 @@ APP_TITLE = "PixelKit"
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 ICON_PATH = APP_DIR / "PixelKit.png"
 SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico"}
-OUTPUT_FORMATS = ["Автоматично", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"]
+OUTPUT_FORMATS = ["Automatic", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"]
 NO_WINDOW_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
 
 
@@ -55,11 +55,11 @@ def find_magick() -> str | None:
 
 def human_size(value: int) -> str:
     size = float(value)
-    for unit in ("Б", "КБ", "МБ", "ГБ"):
-        if size < 1024 or unit == "ГБ":
-            return f"{int(size)} {unit}" if unit == "Б" else f"{size:.1f} {unit}"
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
-    return f"{value} Б"
+    return f"{value} B"
 
 
 def run_magick(command: list[str], **kwargs):
@@ -158,10 +158,10 @@ class BatchWorker(QThread):
                 if result.returncode == 0 and output.exists():
                     completed += 1
                 else:
-                    error = result.stderr.strip() or result.stdout.strip() or "ImageMagick повернув невідому помилку."
+                    error = result.stderr.strip() or result.stdout.strip() or "ImageMagick returned an unknown error."
                     errors.append((source_name, error))
             except subprocess.TimeoutExpired:
-                errors.append((source_name, "Обробка перевищила ліміт у 5 хвилин."))
+                errors.append((source_name, "Processing exceeded the 5-minute limit."))
             except OSError as exc:
                 errors.append((source_name, str(exc)))
             self.progress.emit(index, len(self.jobs), source_name)
@@ -197,7 +197,7 @@ class ImageMagickStudio(QMainWindow):
         self._set_sources([])
 
         if not self.magick:
-            self._show_message(QMessageBox.Icon.Warning, "ImageMagick не знайдено", "Не вдалося знайти magick.exe. Перевір PATH або встановлення ImageMagick.")
+            self._show_message(QMessageBox.Icon.Warning, "ImageMagick not found", "Could not find magick.exe. Check your PATH or ImageMagick installation.")
 
     def _build_ui(self) -> None:
         self.setStyleSheet(self._stylesheet())
@@ -221,7 +221,7 @@ class ImageMagickStudio(QMainWindow):
         title_box.setSpacing(2)
         title = QLabel(APP_TITLE)
         title.setObjectName("appTitle")
-        subtitle = QLabel("Швидкий workflow для resize, compression та конвертації")
+        subtitle = QLabel("A fast workflow for resizing, compression, and conversion")
         subtitle.setObjectName("appSubtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
@@ -260,7 +260,7 @@ class ImageMagickStudio(QMainWindow):
         right.addWidget(self._output_card())
 
         footer = QHBoxLayout()
-        self.status_label = QLabel("Готово до роботи")
+        self.status_label = QLabel("Ready to work")
         self.status_label.setObjectName("statusLabel")
         footer.addWidget(self.status_label)
         footer.addStretch(1)
@@ -300,7 +300,7 @@ class ImageMagickStudio(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(self._section_header("01", "Вхідні зображення", "Один файл, кілька файлів або ціла папка"))
+        layout.addWidget(self._section_header("01", "Input images", "One file, multiple files, or an entire folder"))
 
         self.source_list = DropListWidget()
         self.source_list.setFixedHeight(145)
@@ -310,13 +310,13 @@ class ImageMagickStudio(QMainWindow):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
-        one = QPushButton("＋  Один файл")
+        one = QPushButton("＋  One file")
         one.clicked.connect(self._choose_one)
-        many = QPushButton("＋  Кілька файлів")
+        many = QPushButton("＋  Multiple files")
         many.clicked.connect(self._choose_many)
-        folder = QPushButton("▣  Папка")
+        folder = QPushButton("▣  Folder")
         folder.clicked.connect(self._choose_folder)
-        clear = QPushButton("Очистити")
+        clear = QPushButton("Clear")
         clear.setObjectName("subtleButton")
         clear.clicked.connect(lambda: self._set_sources([]))
         buttons.addWidget(one)
@@ -325,7 +325,7 @@ class ImageMagickStudio(QMainWindow):
         buttons.addStretch(1)
         buttons.addWidget(clear)
         layout.addLayout(buttons)
-        self.source_info = QLabel("Вибери зображення або перетягни його сюди")
+        self.source_info = QLabel("Choose images or drag them here")
         self.source_info.setObjectName("infoLabel")
         layout.addWidget(self.source_info)
         return card
@@ -336,11 +336,11 @@ class ImageMagickStudio(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(self._section_header("02", "Розмір", "Залиш поля порожніми, щоб зберегти оригінальний розмір"))
+        layout.addWidget(self._section_header("02", "Resize", "Leave fields empty to keep the original size"))
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Режим зміни розміру"))
+        mode_row.addWidget(QLabel("Resize mode"))
         self.resize_mode = QComboBox()
-        self.resize_mode.addItems(["Ширина × висота", "По довшій стороні"])
+        self.resize_mode.addItems(["Width × height", "Longest side"])
         mode_row.addStretch(1)
         mode_row.addWidget(self.resize_mode)
         layout.addLayout(mode_row)
@@ -357,13 +357,13 @@ class ImageMagickStudio(QMainWindow):
         self.height_edit = QLineEdit()
         self.height_edit.setPlaceholderText("Original")
         self.height_edit.setValidator(QIntValidator(1, 100000, self))
-        standard_grid.addWidget(QLabel("Ширина"), 0, 0)
+        standard_grid.addWidget(QLabel("Width"), 0, 0)
         standard_grid.addWidget(self.width_edit, 0, 1)
         standard_grid.addWidget(QLabel("px"), 0, 2)
-        standard_grid.addWidget(QLabel("Висота"), 1, 0)
+        standard_grid.addWidget(QLabel("Height"), 1, 0)
         standard_grid.addWidget(self.height_edit, 1, 1)
         standard_grid.addWidget(QLabel("px"), 1, 2)
-        self.keep_ratio = QCheckBox("Зберігати пропорції")
+        self.keep_ratio = QCheckBox("Keep aspect ratio")
         self.keep_ratio.setChecked(True)
         standard_grid.addWidget(self.keep_ratio, 0, 3, 2, 1)
         standard_grid.setColumnStretch(1, 1)
@@ -372,13 +372,13 @@ class ImageMagickStudio(QMainWindow):
         long_side_page = QWidget()
         long_side_row = QHBoxLayout(long_side_page)
         long_side_row.setContentsMargins(0, 0, 0, 0)
-        long_side_row.addWidget(QLabel("Довша сторона"))
+        long_side_row.addWidget(QLabel("Longest side"))
         self.long_side_edit = QLineEdit()
-        self.long_side_edit.setPlaceholderText("Напр. 1600")
+        self.long_side_edit.setPlaceholderText("e.g. 1600")
         self.long_side_edit.setValidator(QIntValidator(1, 100000, self))
         long_side_row.addWidget(self.long_side_edit, 1)
         long_side_row.addWidget(QLabel("px"))
-        long_side_note = QLabel("Пропорції зберігаються автоматично")
+        long_side_note = QLabel("Aspect ratio is preserved automatically")
         long_side_note.setObjectName("infoLabel")
         long_side_row.addSpacing(10)
         long_side_row.addWidget(long_side_note)
@@ -393,9 +393,9 @@ class ImageMagickStudio(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(self._section_header("03", "Якість і метадані", "Оптимізуй розмір файлу без зайвих налаштувань"))
+        layout.addWidget(self._section_header("03", "Quality and metadata", "Optimize file size without unnecessary settings"))
         quality_row = QHBoxLayout()
-        quality_row.addWidget(QLabel("Якість"))
+        quality_row.addWidget(QLabel("Quality"))
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(10, 100)
         self.quality_slider.setValue(82)
@@ -407,11 +407,11 @@ class ImageMagickStudio(QMainWindow):
         quality_row.addWidget(self.quality_slider, 1)
         quality_row.addWidget(self.quality_label)
         layout.addLayout(quality_row)
-        self.strip_metadata = QCheckBox("Видалити EXIF та інші метадані")
+        self.strip_metadata = QCheckBox("Remove EXIF and other metadata")
         self.strip_metadata.setChecked(True)
         layout.addWidget(self.strip_metadata)
         background_row = QHBoxLayout()
-        background_row.addWidget(QLabel("Фон для JPG"))
+        background_row.addWidget(QLabel("JPG background"))
         self.background_edit = QLineEdit("#ffffff")
         self.background_edit.setMaximumWidth(125)
         background_row.addStretch(1)
@@ -426,13 +426,13 @@ class ImageMagickStudio(QMainWindow):
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(12)
         heading = QHBoxLayout()
-        heading.addWidget(self._section_header("PREVIEW", "Попередній перегляд", "Перший файл зі списку"))
+        heading.addWidget(self._section_header("PREVIEW", "Preview", "First file in the list"))
         heading.addStretch(1)
         self.preview_format = QLabel("READY")
         self.preview_format.setObjectName("valueBadge")
         heading.addWidget(self.preview_format, alignment=Qt.AlignmentFlag.AlignTop)
         layout.addLayout(heading)
-        self.preview = QLabel("Перетягни зображення сюди\nабо обери файл ліворуч")
+        self.preview = QLabel("Drag an image here\nor choose a file on the left")
         self.preview.setObjectName("preview")
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setMinimumSize(360, 300)
@@ -446,9 +446,9 @@ class ImageMagickStudio(QMainWindow):
         layout = QVBoxLayout(card)
         layout.setContentsMargins(20, 18, 20, 20)
         layout.setSpacing(12)
-        layout.addWidget(self._section_header("04", "Експорт", "Формат і місце збереження результату"))
+        layout.addWidget(self._section_header("04", "Export", "Output format and save location"))
         format_row = QHBoxLayout()
-        format_row.addWidget(QLabel("Формат"))
+        format_row.addWidget(QLabel("Format"))
         self.format_combo = QComboBox()
         self.format_combo.addItems(OUTPUT_FORMATS)
         self.format_combo.currentTextChanged.connect(self._format_changed)
@@ -456,14 +456,14 @@ class ImageMagickStudio(QMainWindow):
         format_row.addWidget(self.format_combo)
         layout.addLayout(format_row)
         self.output_edit = QLineEdit()
-        self.output_edit.setPlaceholderText("Файл або папка результатів")
-        self.output_button = QPushButton("Обрати…")
+        self.output_edit.setPlaceholderText("Output file or folder")
+        self.output_button = QPushButton("Choose…")
         self.output_button.clicked.connect(self._choose_output)
         output_row = QHBoxLayout()
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_button)
         layout.addLayout(output_row)
-        self.process_button = QPushButton("⚡  Обробити та зберегти")
+        self.process_button = QPushButton("⚡  Process and save")
         self.process_button.setObjectName("primaryButton")
         self.process_button.setMinimumHeight(46)
         self.process_button.clicked.connect(self._start_processing)
@@ -573,8 +573,8 @@ class ImageMagickStudio(QMainWindow):
         action_row = QHBoxLayout()
         action_row.addStretch(1)
         button_map = (
-            (QMessageBox.StandardButton.No, "Ні"),
-            (QMessageBox.StandardButton.Yes, "Так"),
+            (QMessageBox.StandardButton.No, "No"),
+            (QMessageBox.StandardButton.Yes, "Yes"),
             (QMessageBox.StandardButton.Ok, "OK"),
         )
         for button, label in button_map:
@@ -600,15 +600,15 @@ class ImageMagickStudio(QMainWindow):
         self.sources = unique
         self.source_list.clear()
         if not unique:
-            item = QListWidgetItem("Порожньо — перетягни файли сюди")
+            item = QListWidgetItem("Empty — drag files here")
             item.setFlags(Qt.ItemFlag.NoItemFlags)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.source_list.addItem(item)
-            self.source_info.setText("Вибери зображення або перетягни його сюди")
+            self.source_info.setText("Choose images or drag them here")
             self.output_edit.clear()
             self.preview_pixmap = QPixmap()
             self.preview.clear()
-            self.preview.setText("Перетягни зображення сюди\nабо обери файл ліворуч")
+            self.preview.setText("Drag an image here\nor choose a file on the left")
             self.preview_format.setText("READY")
             self._update_output_mode()
             return
@@ -618,33 +618,33 @@ class ImageMagickStudio(QMainWindow):
         first = unique[0]
         reader = QImageReader(str(first))
         image_size = reader.size()
-        dimensions = f"{image_size.width()}x{image_size.height()}" if image_size.isValid() else "розмір невідомий"
-        extra = f"  •  та ще {len(unique) - 1} файлів" if len(unique) > 1 else ""
+        dimensions = f"{image_size.width()}x{image_size.height()}" if image_size.isValid() else "unknown size"
+        extra = f"  •  and {len(unique) - 1} more files" if len(unique) > 1 else ""
         self.source_info.setText(f"{dimensions}  •  {human_size(first.stat().st_size)}  •  {first.suffix.upper().lstrip('.')}" + extra)
         self.default_output = True
         self._set_default_output()
         self._update_output_mode()
         self._start_preview(first)
-        self._set_status(f"Вибрано файлів: {len(unique)}")
+        self._set_status(f"Selected files: {len(unique)}")
 
     def _choose_one(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Вибери зображення", "", "Зображення (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico);;Усі файли (*.*)")
+        path, _ = QFileDialog.getOpenFileName(self, "Choose an image", "", "Images (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico);;All files (*.*)")
         if path:
             self._set_sources([Path(path)])
 
     def _choose_many(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Вибери зображення", "", "Зображення (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico);;Усі файли (*.*)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Choose images", "", "Images (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico);;All files (*.*)")
         if paths:
             self._set_sources([Path(path) for path in paths])
 
     def _choose_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Вибери папку із зображеннями")
+        folder = QFileDialog.getExistingDirectory(self, "Choose an image folder")
         if folder:
             paths = sorted((path for path in Path(folder).iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES), key=lambda path: path.name.lower())
             if paths:
                 self._set_sources(paths)
             else:
-                self._show_message(QMessageBox.Icon.Information, "Зображення не знайдено", "У цій папці немає підтримуваних зображень.")
+                self._show_message(QMessageBox.Icon.Information, "No images found", "This folder does not contain supported images.")
 
     def _clear_sources(self) -> None:
         if not self.worker or not self.worker.isRunning():
@@ -653,10 +653,10 @@ class ImageMagickStudio(QMainWindow):
     def _start_preview(self, source: Path) -> None:
         if not self.magick:
             return
-        self.preview.setText("Готую прев’ю…")
+        self.preview.setText("Preparing preview…")
         self.preview_thread = PreviewWorker(self.magick, source, self.colors["card_alt"])
         self.preview_thread.ready.connect(self._show_preview)
-        self.preview_thread.failed.connect(lambda: self.preview.setText("Не вдалося показати прев’ю"))
+        self.preview_thread.failed.connect(lambda: self.preview.setText("Could not display preview"))
         self.preview_thread.start()
 
     def _show_preview(self, path: str) -> None:
@@ -680,7 +680,7 @@ class ImageMagickStudio(QMainWindow):
     def _selected_extension(self, source: Path | None = None) -> str:
         selected = self.format_combo.currentText().lower()
         current_source = source or (self.sources[0] if self.sources else None)
-        if selected == "автоматично":
+        if selected == "automatic":
             return current_source.suffix.lstrip(".").lower() if current_source else "jpg"
         return selected
 
@@ -695,8 +695,8 @@ class ImageMagickStudio(QMainWindow):
 
     def _update_output_mode(self) -> None:
         batch = len(self.sources) > 1
-        self.output_edit.setPlaceholderText("Папка результатів" if batch else "Файл результату")
-        self.output_button.setText("Обрати папку…" if batch else "Обрати…")
+        self.output_edit.setPlaceholderText("Output folder" if batch else "Output file")
+        self.output_button.setText("Choose folder…" if batch else "Choose…")
 
     def _format_changed(self) -> None:
         if self.default_output:
@@ -704,12 +704,12 @@ class ImageMagickStudio(QMainWindow):
 
     def _choose_output(self) -> None:
         if len(self.sources) > 1:
-            folder = QFileDialog.getExistingDirectory(self, "Вибери папку для результатів")
+            folder = QFileDialog.getExistingDirectory(self, "Choose an output folder")
             if folder:
                 self.output_edit.setText(folder)
                 self.default_output = False
             return
-        selected, _ = QFileDialog.getSaveFileName(self, "Зберегти результат", self.output_edit.text(), "Зображення (*.jpg *.jpeg *.png *.webp *.avif *.gif *.bmp *.tif *.tiff);;Усі файли (*.*)")
+        selected, _ = QFileDialog.getSaveFileName(self, "Save output", self.output_edit.text(), "Images (*.jpg *.jpeg *.png *.webp *.avif *.gif *.bmp *.tif *.tiff);;All files (*.*)")
         if selected:
             self.output_edit.setText(selected)
             self.default_output = False
@@ -743,14 +743,14 @@ class ImageMagickStudio(QMainWindow):
 
     def _start_processing(self) -> None:
         if not self.magick:
-            self._show_message(QMessageBox.Icon.Critical, "ImageMagick не знайдено", "Перевір встановлення ImageMagick та PATH.")
+            self._show_message(QMessageBox.Icon.Critical, "ImageMagick not found", "Check your ImageMagick installation and PATH.")
             return
         if not self.sources:
-            self._show_message(QMessageBox.Icon.Information, "Немає зображень", "Спочатку додай хоча б одне зображення.")
+            self._show_message(QMessageBox.Icon.Information, "No images", "Add at least one image first.")
             return
         output_text = self.output_edit.text().strip()
         if not output_text:
-            self._show_message(QMessageBox.Icon.Information, "Немає місця збереження", "Вкажи файл або папку для результату.")
+            self._show_message(QMessageBox.Icon.Information, "No output location", "Choose an output file or folder.")
             return
         output = Path(output_text)
         batch = len(self.sources) > 1
@@ -768,7 +768,7 @@ class ImageMagickStudio(QMainWindow):
                 used.add(candidate.resolve())
                 outputs.append(candidate)
             existing = [path for path in outputs if path.exists()]
-            if existing and not self._confirm("Файли вже існують", f"У папці вже є {len(existing)} результатів. Перезаписати?"):
+            if existing and not self._confirm("Files already exist", f"The folder already contains {len(existing)} output files. Overwrite them?"):
                 return
         else:
             if not output.suffix:
@@ -776,9 +776,9 @@ class ImageMagickStudio(QMainWindow):
                 self.output_edit.setText(str(output))
             output.parent.mkdir(parents=True, exist_ok=True)
             if output.resolve() == self.sources[0].resolve():
-                self._show_message(QMessageBox.Icon.Critical, "Небезпечне перезаписування", "Файл результату має відрізнятися від вхідного.")
+                self._show_message(QMessageBox.Icon.Critical, "Unsafe overwrite", "The output file must be different from the input file.")
                 return
-            if output.exists() and not self._confirm("Файл уже існує", f"Перезаписати файл?\n\n{output}"):
+            if output.exists() and not self._confirm("File already exists", f"Overwrite this file?\n\n{output}"):
                 return
             outputs = [output]
 
@@ -787,7 +787,7 @@ class ImageMagickStudio(QMainWindow):
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.progress.show()
-        self._set_status(f"Обробляю 0 / {len(jobs)}…")
+        self._set_status(f"Processing 0 / {len(jobs)}…")
         self.worker = BatchWorker(jobs, output if batch else output.parent)
         self.worker.progress.connect(lambda current, total, name: self._set_progress(current, total, name))
         self.worker.finished.connect(self._processing_finished)
@@ -795,19 +795,19 @@ class ImageMagickStudio(QMainWindow):
 
     def _set_progress(self, current: int, total: int, name: str) -> None:
         self.progress.setValue(current)
-        self._set_status(f"Обробляю {current} / {total}: {name}")
+        self._set_status(f"Processing {current} / {total}: {name}")
 
     def _processing_finished(self, completed: int, total: int, errors: list, output_dir: str) -> None:
         self.process_button.setEnabled(True)
         self.progress.hide()
-        self._set_status(f"Готово: {completed} / {total} файлів")
+        self._set_status(f"Done: {completed} / {total} files")
         if errors:
             lines = "\n".join(f"• {name}: {message[:180]}" for name, message in errors[:5])
             if len(errors) > 5:
-                lines += f"\n• … та ще {len(errors) - 5} помилок"
-            self._show_message(QMessageBox.Icon.Warning, "Обробку завершено з помилками", f"Успішно: {completed} / {total}\n\nРезультати: {output_dir}\n\n{lines}")
+                lines += f"\n• … and {len(errors) - 5} more errors"
+            self._show_message(QMessageBox.Icon.Warning, "Processing completed with errors", f"Successful: {completed} / {total}\n\nOutputs: {output_dir}\n\n{lines}")
         else:
-            self._show_message(QMessageBox.Icon.Information, "Готово", f"Оброблено файлів: {completed}\n\nРезультати збережено в:\n{output_dir}")
+            self._show_message(QMessageBox.Icon.Information, "Done", f"Files processed: {completed}\n\nOutputs saved to:\n{output_dir}")
 
 
 def main() -> None:

@@ -49,7 +49,7 @@ def install() -> Path:
     payload = resource_root() / "payload"
     destination = install_root()
     if not payload.exists():
-        raise FileNotFoundError("В інсталяторі відсутні файли PixelKit.")
+        raise FileNotFoundError("PixelKit files are missing from the installer.")
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copytree(payload, destination, dirs_exist_ok=True)
 
@@ -64,7 +64,7 @@ def install() -> Path:
 
 def main() -> None:
     root = tk.Tk()
-    root.title("Встановлення PixelKit")
+    root.title("Install PixelKit")
     root.geometry("500x240")
     root.resizable(False, False)
     root.configure(bg="#0d1117")
@@ -72,8 +72,8 @@ def main() -> None:
     frame = tk.Frame(root, bg="#0d1117", padx=28, pady=24)
     frame.pack(fill="both", expand=True)
     tk.Label(frame, text="PixelKit", bg="#0d1117", fg="#f4f7fb", font=("Segoe UI", 22, "bold")).pack(anchor="w")
-    tk.Label(frame, text="Встановлення редактора зображень", bg="#0d1117", fg="#93a0b3", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 18))
-    status = tk.Label(frame, text="Підготовка…", bg="#0d1117", fg="#dce5f0", font=("Segoe UI", 10))
+    tk.Label(frame, text="Installing the image editor", bg="#0d1117", fg="#93a0b3", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 18))
+    status = tk.Label(frame, text="Preparing…", bg="#0d1117", fg="#dce5f0", font=("Segoe UI", 10))
     status.pack(anchor="w")
     progress = ttk.Progressbar(frame, mode="indeterminate", length=440)
     progress.pack(fill="x", pady=(14, 0))
@@ -81,20 +81,20 @@ def main() -> None:
 
     def run_install() -> None:
         try:
-            status.configure(text="Копіюю файли програми…")
+            status.configure(text="Copying application files…")
             root.update_idletasks()
             executable = install()
             progress.stop()
             progress.configure(mode="determinate", value=100)
-            status.configure(text="PixelKit успішно встановлено")
+            status.configure(text="PixelKit was installed successfully")
             root.after(250, lambda: _finish(executable))
         except Exception as exc:
             progress.stop()
-            status.configure(text="Встановлення не вдалося")
-            messagebox.showerror("Помилка встановлення", str(exc), parent=root)
+            status.configure(text="Installation failed")
+            messagebox.showerror("Installation error", str(exc), parent=root)
 
     def _finish(executable: Path) -> None:
-        if messagebox.askyesno("PixelKit встановлено", "Створено ярлик на робочому столі.\n\nЗапустити PixelKit зараз?", parent=root):
+        if messagebox.askyesno("PixelKit installed", "A desktop shortcut was created.\n\nLaunch PixelKit now?", parent=root):
             subprocess.Popen([str(executable)], cwd=str(executable.parent))
         root.destroy()
 

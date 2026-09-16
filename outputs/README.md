@@ -1,32 +1,32 @@
 # PixelKit
 
-Сучасний графічний інтерфейс для ImageMagick CLI під Windows на Qt 6 / PyQt6.
+A modern Qt 6 / PyQt6 graphical interface for ImageMagick CLI on Windows.
 
-## Встановлення
+## Installation
 
-1. Запусти `PixelKit-Setup.exe`.
-2. Інсталятор створить ярлик PixelKit на робочому столі та в меню «Пуск».
+1. Run `PixelKit-Setup.exe`.
+2. The installer will create PixelKit shortcuts on the desktop and in the Start menu.
 
-Для запуску з вихідних файлів потрібні Python, PyQt6 та ImageMagick. Також можна двічі клацнути `PixelKit.cmd`.
+The packaged installer includes ImageMagick. When running from source, Python, PyQt6, and ImageMagick must be installed separately. You can also launch the app by double-clicking `PixelKit.cmd`.
 
-Також можна запустити командою:
+To run the Qt application directly:
 
 ```text
 python ImageMagick_Studio_Qt.py
 ```
 
-## Можливості
+## Features
 
-- вибір JPG, PNG, WEBP, GIF, BMP, TIFF, AVIF та інших форматів;
-- пакетна обробка кількох файлів або всіх зображень у вибраній папці;
-- зміна ширини та висоти зі збереженням пропорцій або без нього;
-- зміна розміру лише по довшій стороні для одночасної обробки горизонтальних і вертикальних зображень;
-- стиснення через параметр якості;
-- конвертація в JPG, PNG, WEBP, AVIF, GIF, BMP або TIFF;
-- видалення EXIF та інших метаданих;
-- прев’ю вхідного зображення;
-- вибір шляху для файлу результату.
+- Support for JPG, PNG, WEBP, GIF, BMP, TIFF, AVIF, and other ImageMagick formats.
+- Batch processing of multiple files or all images in a selected folder.
+- Resize by width and height, with optional aspect-ratio preservation.
+- Resize by the longest side for mixed landscape and portrait images.
+- Adjustable compression quality.
+- Convert to JPG, PNG, WEBP, AVIF, GIF, BMP, TIFF, and more.
+- Remove EXIF and other image metadata.
+- Built-in input image preview.
+- Select a custom output folder.
 
-Для пакетної обробки натисни `Кілька…` або `Папка…`. Результати автоматично отримають суфікс `_optimized` і будуть збережені у вибрану папку.
+For batch processing, use `Multiple files` or `Folder`. Results automatically receive the `_optimized` suffix and are saved to the selected output folder.
 
-Нова Qt-версія оптимізована для Windows HiDPI/масштабування та має drag-and-drop файлів.
+The Qt version is optimized for Windows HiDPI scaling and supports drag-and-drop image files.

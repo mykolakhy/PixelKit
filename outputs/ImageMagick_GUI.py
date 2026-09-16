@@ -14,11 +14,11 @@ from tkinter import filedialog, messagebox, ttk
 
 APP_TITLE = "ImageMagick Studio"
 SUPPORTED_INPUTS = [
-    ("Зображення", "*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico"),
-    ("Усі файли", "*.*"),
+    ("Images", "*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico"),
+    ("All files", "*.*"),
 ]
 SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico"}
-OUTPUT_FORMATS = ["Автоматично", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"]
+OUTPUT_FORMATS = ["Automatic", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"]
 
 
 def find_magick() -> str | None:
@@ -35,13 +35,13 @@ def find_magick() -> str | None:
 
 
 def human_size(value: int) -> str:
-    units = ["Б", "КБ", "МБ", "ГБ"]
+    units = ["B", "KB", "MB", "GB"]
     size = float(value)
     for unit in units:
         if size < 1024 or unit == units[-1]:
-            return f"{size:.1f} {unit}" if unit != "Б" else f"{int(size)} {unit}"
+            return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
         size /= 1024
-    return f"{value} Б"
+    return f"{value} B"
 
 
 class ImageMagickGUI(tk.Tk):
@@ -82,8 +82,8 @@ class ImageMagickGUI(tk.Tk):
         self.keep_ratio_var = tk.BooleanVar(value=True)
         self.strip_metadata_var = tk.BooleanVar(value=True)
         self.background_var = tk.StringVar(value="#ffffff")
-        self.status_var = tk.StringVar(value="Готово до роботи")
-        self.details_var = tk.StringVar(value="Вибери зображення, щоб побачити його параметри")
+        self.status_var = tk.StringVar(value="Ready to work")
+        self.details_var = tk.StringVar(value="Choose an image to see its details")
 
         self._setup_style()
         self._build_ui()
@@ -93,8 +93,8 @@ class ImageMagickGUI(tk.Tk):
             self.after(
                 300,
                 lambda: messagebox.showwarning(
-                    "ImageMagick не знайдено",
-                    "Не вдалося знайти magick.exe. Встанови ImageMagick або додай його до PATH.",
+                    "ImageMagick not found",
+                    "Could not find magick.exe. Install ImageMagick or add it to PATH.",
                 ),
             )
 
@@ -138,7 +138,7 @@ class ImageMagickGUI(tk.Tk):
         brand_text = tk.Frame(brand, bg=c["bg"])
         brand_text.pack(side="left", anchor="w")
         ttk.Label(brand_text, text="ImageMagick Studio", style="Title.TLabel").pack(anchor="w")
-        ttk.Label(brand_text, text="Стискай, змінюй розмір і конвертуй зображення в кілька кліків", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
+        ttk.Label(brand_text, text="Compress, resize, and convert images in a few clicks", style="Subtitle.TLabel").pack(anchor="w", pady=(2, 0))
         tk.Label(header, text="●  IMAGE PROCESSOR", bg="#172d2d", fg=c["teal"], font=("Segoe UI", 9, "bold"), padx=12, pady=7).pack(side="right", anchor="n", pady=(5, 0))
 
         content = ttk.Frame(root, style="App.TFrame")
@@ -170,40 +170,40 @@ class ImageMagickGUI(tk.Tk):
 
         source_card = self._card(left, row=0, column=0, sticky="ew", pady=(0, 12))
         source_card.columnconfigure(0, weight=1)
-        ttk.Label(source_card, text="1. Вхідні зображення", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(source_card, text="Обери один файл, кілька файлів або цілу папку", style="Muted.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 12))
+        ttk.Label(source_card, text="1. Input images", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(source_card, text="Choose one file, multiple files, or an entire folder", style="Muted.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 12))
         source_entry = ttk.Entry(source_card, textvariable=self.source_var, state="readonly")
         source_entry.grid(row=2, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(source_card, text="Один файл…", style="Secondary.TButton", command=self._choose_source).grid(row=2, column=1, padx=(0, 6))
-        ttk.Button(source_card, text="Кілька…", style="Secondary.TButton", command=self._choose_multiple_sources).grid(row=2, column=2, padx=(0, 6))
-        ttk.Button(source_card, text="Папка…", style="Secondary.TButton", command=self._choose_source_folder).grid(row=2, column=3)
+        ttk.Button(source_card, text="One file…", style="Secondary.TButton", command=self._choose_source).grid(row=2, column=1, padx=(0, 6))
+        ttk.Button(source_card, text="Multiple…", style="Secondary.TButton", command=self._choose_multiple_sources).grid(row=2, column=2, padx=(0, 6))
+        ttk.Button(source_card, text="Folder…", style="Secondary.TButton", command=self._choose_source_folder).grid(row=2, column=3)
         self.file_listbox = tk.Listbox(source_card, height=4, bg=self.colors["input"], fg="#dce5f0", selectbackground=self.colors["accent"], selectforeground="#ffffff", relief="flat", borderwidth=0, highlightthickness=0, font=("Segoe UI", 9), activestyle="none")
         self.file_listbox.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(12, 0))
-        ttk.Button(source_card, text="Очистити", style="Secondary.TButton", command=self._clear_sources).grid(row=3, column=3, sticky="ne", pady=(12, 0))
+        ttk.Button(source_card, text="Clear", style="Secondary.TButton", command=self._clear_sources).grid(row=3, column=3, sticky="ne", pady=(12, 0))
         ttk.Label(source_card, textvariable=self.details_var, style="Muted.TLabel").grid(row=4, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
         resize_card = self._card(left, row=1, column=0, sticky="nsew", pady=(0, 12))
         resize_card.columnconfigure(1, weight=1)
-        ttk.Label(resize_card, text="2. Розмір зображення", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(resize_card, text="Залиш поля порожніми, щоб не змінювати розмір", style="Muted.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 14))
-        ttk.Label(resize_card, text="Ширина", style="Body.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(resize_card, text="2. Image size", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(resize_card, text="Leave fields empty to keep the original size", style="Muted.TLabel").grid(row=1, column=0, columnspan=4, sticky="w", pady=(3, 14))
+        ttk.Label(resize_card, text="Width", style="Body.TLabel").grid(row=2, column=0, sticky="w")
         ttk.Entry(resize_card, textvariable=self.width_var, width=10).grid(row=2, column=1, sticky="w", padx=(8, 18))
         ttk.Label(resize_card, text="px", style="Muted.TLabel").grid(row=2, column=2, sticky="w")
-        ttk.Label(resize_card, text="Висота", style="Body.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
+        ttk.Label(resize_card, text="Height", style="Body.TLabel").grid(row=3, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(resize_card, textvariable=self.height_var, width=10).grid(row=3, column=1, sticky="w", padx=(8, 18), pady=(10, 0))
         ttk.Label(resize_card, text="px", style="Muted.TLabel").grid(row=3, column=2, sticky="w", pady=(10, 0))
-        ttk.Checkbutton(resize_card, text="Зберігати пропорції", variable=self.keep_ratio_var).grid(row=2, column=3, rowspan=2, sticky="w", padx=(24, 0))
+        ttk.Checkbutton(resize_card, text="Keep aspect ratio", variable=self.keep_ratio_var).grid(row=2, column=3, rowspan=2, sticky="w", padx=(24, 0))
 
         quality_card = self._card(left, row=2, column=0, sticky="ew", pady=(0, 12))
         quality_card.columnconfigure(1, weight=1)
-        ttk.Label(quality_card, text="3. Стиснення та додаткові параметри", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(quality_card, text="Якість: 100 — найкраща якість, менше значення — менший файл", style="Muted.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 10))
+        ttk.Label(quality_card, text="3. Compression and advanced options", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(quality_card, text="Quality: 100 — best quality; lower values produce smaller files", style="Muted.TLabel").grid(row=1, column=0, columnspan=3, sticky="w", pady=(3, 10))
         ttk.Scale(quality_card, from_=10, to=100, variable=self.quality_var, orient="horizontal").grid(row=2, column=0, columnspan=2, sticky="ew", padx=(0, 10))
         self.quality_label = ttk.Label(quality_card, text="82", style="Body.TLabel", width=4)
         self.quality_label.grid(row=2, column=2, sticky="e")
         self.quality_var.trace_add("write", lambda *_: self.quality_label.configure(text=str(self.quality_var.get())))
-        ttk.Checkbutton(quality_card, text="Видалити метадані (EXIF та ін.)", variable=self.strip_metadata_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=(12, 0))
-        ttk.Label(quality_card, text="Фон для прозорих зображень при збереженні в JPG", style="Muted.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Checkbutton(quality_card, text="Remove metadata (EXIF, etc.)", variable=self.strip_metadata_var).grid(row=3, column=0, columnspan=3, sticky="w", pady=(12, 0))
+        ttk.Label(quality_card, text="Background for transparent images saved as JPG", style="Muted.TLabel").grid(row=4, column=0, columnspan=2, sticky="w", pady=(10, 0))
         ttk.Entry(quality_card, textvariable=self.background_var, width=12).grid(row=4, column=2, sticky="e", pady=(10, 0))
 
     def _build_right_panel(self, parent: ttk.Frame) -> None:
@@ -215,44 +215,44 @@ class ImageMagickGUI(tk.Tk):
         preview_card = self._card(right, row=0, column=0, sticky="nsew", pady=(0, 12))
         preview_card.columnconfigure(0, weight=1)
         preview_card.rowconfigure(1, weight=1)
-        ttk.Label(preview_card, text="Попередній перегляд", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
-        self.preview = tk.Label(preview_card, text="Тут з’явиться прев’ю", bg=self.colors["panel_alt"], fg=self.colors["muted"], font=("Segoe UI", 10), anchor="center")
+        ttk.Label(preview_card, text="Preview", style="CardTitle.TLabel").grid(row=0, column=0, sticky="w")
+        self.preview = tk.Label(preview_card, text="Preview will appear here", bg=self.colors["panel_alt"], fg=self.colors["muted"], font=("Segoe UI", 10), anchor="center")
         self.preview.grid(row=1, column=0, sticky="nsew", pady=(12, 0), ipadx=8, ipady=8)
 
         output_card = self._card(right, row=1, column=0, sticky="ew")
         output_card.columnconfigure(0, weight=1)
-        ttk.Label(output_card, text="4. Формат і збереження", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
-        ttk.Label(output_card, text="Формат файлу", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=(14, 0))
+        ttk.Label(output_card, text="4. Format and output", style="CardTitle.TLabel").grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(output_card, text="File format", style="Body.TLabel").grid(row=1, column=0, sticky="w", pady=(14, 0))
         format_box = ttk.Combobox(output_card, textvariable=self.format_var, values=OUTPUT_FORMATS, state="readonly", width=16)
         format_box.grid(row=1, column=1, sticky="e", pady=(14, 0))
         format_box.bind("<<ComboboxSelected>>", self._format_changed)
-        self.output_label = ttk.Label(output_card, text="Файл результату", style="Body.TLabel")
+        self.output_label = ttk.Label(output_card, text="Output file", style="Body.TLabel")
         self.output_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(12, 4))
         output_row = ttk.Frame(output_card, style="Card.TFrame")
         output_row.grid(row=3, column=0, columnspan=2, sticky="ew")
         output_row.columnconfigure(0, weight=1)
         ttk.Entry(output_row, textvariable=self.output_var).grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        self.output_button = ttk.Button(output_row, text="Обрати…", style="Secondary.TButton", command=self._choose_output)
+        self.output_button = ttk.Button(output_row, text="Choose…", style="Secondary.TButton", command=self._choose_output)
         self.output_button.grid(row=0, column=1)
-        self.process_button = ttk.Button(output_card, text="Обробити та зберегти", style="Primary.TButton", command=self._start_processing)
+        self.process_button = ttk.Button(output_card, text="Process and save", style="Primary.TButton", command=self._start_processing)
         self.process_button.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(18, 0))
 
     def _choose_source(self) -> None:
-        path = filedialog.askopenfilename(title="Вибери зображення", filetypes=SUPPORTED_INPUTS)
+        path = filedialog.askopenfilename(title="Choose an image", filetypes=SUPPORTED_INPUTS)
         if not path:
             return
         self._set_sources([Path(path)])
-        self.status_var.set("Зображення завантажено")
+        self.status_var.set("Image loaded")
 
     def _choose_multiple_sources(self) -> None:
-        paths = filedialog.askopenfilenames(title="Вибери зображення", filetypes=SUPPORTED_INPUTS)
+        paths = filedialog.askopenfilenames(title="Choose images", filetypes=SUPPORTED_INPUTS)
         if not paths:
             return
         self._set_sources([Path(path) for path in paths])
-        self.status_var.set(f"Вибрано файлів: {len(self.source_paths)}")
+        self.status_var.set(f"Selected files: {len(self.source_paths)}")
 
     def _choose_source_folder(self) -> None:
-        folder = filedialog.askdirectory(title="Вибери папку із зображеннями")
+        folder = filedialog.askdirectory(title="Choose an image folder")
         if not folder:
             return
         paths = sorted(
@@ -260,10 +260,10 @@ class ImageMagickGUI(tk.Tk):
             key=lambda path: path.name.lower(),
         )
         if not paths:
-            messagebox.showwarning("Зображення не знайдено", "У вибраній папці немає підтримуваних зображень.")
+            messagebox.showwarning("No images found", "The selected folder does not contain supported images.")
             return
         self._set_sources(paths)
-        self.status_var.set(f"Вибрано файлів із папки: {len(self.source_paths)}")
+        self.status_var.set(f"Selected files from folder: {len(self.source_paths)}")
 
     def _set_sources(self, paths: list[Path]) -> None:
         unique_paths = list(dict.fromkeys(path.resolve() for path in paths if path.is_file()))
@@ -272,16 +272,16 @@ class ImageMagickGUI(tk.Tk):
         self.file_listbox.delete(0, tk.END)
         if not unique_paths:
             self.source_var.set("")
-            self.details_var.set("Вибери зображення, щоб побачити його параметри")
+            self.details_var.set("Choose an image to see its details")
             self.output_var.set("")
-            self.preview.configure(image="", text="Тут з’явиться прев’ю")
+            self.preview.configure(image="", text="Preview will appear here")
             self.preview_photo = None
             self._update_output_ui()
             return
 
         for path in unique_paths:
             self.file_listbox.insert(tk.END, path.name)
-        self.source_var.set(str(unique_paths[0]) if len(unique_paths) == 1 else f"Вибрано {len(unique_paths)} файлів")
+        self.source_var.set(str(unique_paths[0]) if len(unique_paths) == 1 else f"Selected {len(unique_paths)} files")
         self.default_output_path = True
         self._set_default_output()
         self._load_source_info()
@@ -292,18 +292,18 @@ class ImageMagickGUI(tk.Tk):
         if self.busy:
             return
         self._set_sources([])
-        self.status_var.set("Список зображень очищено")
+        self.status_var.set("Image list cleared")
 
     def _update_output_ui(self) -> None:
         batch = len(self.source_paths) > 1
-        self.output_label.configure(text="Папка результатів" if batch else "Файл результату")
-        self.output_button.configure(text="Обрати папку…" if batch else "Обрати…")
+        self.output_label.configure(text="Output folder" if batch else "Output file")
+        self.output_button.configure(text="Choose folder…" if batch else "Choose…")
 
     def _load_source_info(self) -> None:
         if not self.source_path:
             return
         size = self.source_path.stat().st_size
-        dimensions = "розмір невідомий"
+        dimensions = "unknown size"
         if self.magick:
             try:
                 result = subprocess.run(
@@ -316,15 +316,15 @@ class ImageMagickGUI(tk.Tk):
                 dimensions = result.stdout.strip().splitlines()[0]
             except (OSError, subprocess.SubprocessError, IndexError):
                 pass
-        details = f"{dimensions}  •  {human_size(size)}  •  {self.source_path.suffix.upper().lstrip('.') or 'без розширення'}"
+        details = f"{dimensions}  •  {human_size(size)}  •  {self.source_path.suffix.upper().lstrip('.') or 'no extension'}"
         if len(self.source_paths) > 1:
-            details += f"  •  та ще {len(self.source_paths) - 1} файлів"
+            details += f"  •  and {len(self.source_paths) - 1} more files"
         self.details_var.set(details)
 
     def _make_preview(self) -> None:
         if not self.source_path or not self.magick:
             return
-        self.preview.configure(text="Створюю прев’ю…", image="")
+        self.preview.configure(text="Creating preview…", image="")
 
         def worker() -> None:
             try:
@@ -362,7 +362,7 @@ class ImageMagickGUI(tk.Tk):
 
     def _selected_extension(self, source: Path | None = None) -> str:
         selected = self.format_var.get().lower()
-        if selected == "автоматично":
+        if selected == "automatic":
             current_source = source or self.source_path
             return current_source.suffix.lstrip(".").lower() if current_source else "jpg"
         return selected.lower()
@@ -373,18 +373,18 @@ class ImageMagickGUI(tk.Tk):
 
     def _choose_output(self) -> None:
         if len(self.source_paths) > 1:
-            selected = filedialog.askdirectory(title="Вибери папку для результатів")
+            selected = filedialog.askdirectory(title="Choose an output folder")
             if selected:
                 self.output_var.set(selected)
                 self.default_output_path = False
             return
         initial = self.output_var.get() or "optimized.jpg"
         selected = filedialog.asksaveasfilename(
-            title="Зберегти результат",
+            title="Save output",
             initialfile=Path(initial).name,
             initialdir=str(Path(initial).parent) if Path(initial).parent.exists() else None,
             defaultextension=f".{self._selected_extension()}",
-            filetypes=[("Зображення", "*.jpg *.jpeg *.png *.webp *.avif *.gif *.bmp *.tif *.tiff"), ("Усі файли", "*.*")],
+            filetypes=[("Images", "*.jpg *.jpeg *.png *.webp *.avif *.gif *.bmp *.tif *.tiff"), ("All files", "*.*")],
         )
         if selected:
             self.output_var.set(selected)
@@ -392,14 +392,14 @@ class ImageMagickGUI(tk.Tk):
 
     def _validate(self) -> tuple[list[Path], Path] | None:
         if not self.magick:
-            messagebox.showerror("ImageMagick не знайдено", "Перевір встановлення ImageMagick та змінну PATH.")
+            messagebox.showerror("ImageMagick not found", "Check your ImageMagick installation and PATH.")
             return None
         if not self.source_paths or any(not path.exists() for path in self.source_paths):
-            messagebox.showerror("Немає вхідного файлу", "Спочатку обери зображення для обробки.")
+            messagebox.showerror("No input file", "Choose an image to process first.")
             return None
         output_text = self.output_var.get().strip()
         if not output_text:
-            messagebox.showerror("Немає файлу результату", "Вкажи шлях, куди зберегти результат.")
+            messagebox.showerror("No output file", "Choose where to save the output.")
             return None
         try:
             width = self.width_var.get().strip()
@@ -409,7 +409,7 @@ class ImageMagickGUI(tk.Tk):
             if height and (not height.isdigit() or int(height) <= 0):
                 raise ValueError
         except ValueError:
-            messagebox.showerror("Некоректний розмір", "Ширина та висота мають бути додатними цілими числами.")
+            messagebox.showerror("Invalid size", "Width and height must be positive integers.")
             return None
         output = Path(output_text)
         if len(self.source_paths) > 1:
@@ -461,7 +461,7 @@ class ImageMagickGUI(tk.Tk):
         sources, destination = validated
         batch = len(sources) > 1
         if not batch and destination.resolve() == sources[0].resolve():
-            messagebox.showerror("Небезпечне перезаписування", "Файл результату має відрізнятися від вхідного файлу.")
+            messagebox.showerror("Unsafe overwrite", "The output file must be different from the input file.")
             return
 
         jobs: list[tuple[Path, Path]]
@@ -470,24 +470,24 @@ class ImageMagickGUI(tk.Tk):
             jobs = [(source, self._batch_output_path(source, destination, used)) for source in sources]
             existing = [output for _, output in jobs if output.exists()]
             if existing and not messagebox.askyesno(
-                "Файли вже існують",
-                f"У папці вже є {len(existing)} файл(ів) результату.\n\nПерезаписати їх?",
+                "Files already exist",
+                f"The folder already contains {len(existing)} output file(s).\n\nOverwrite them?",
             ):
                 return
         else:
             jobs = [(sources[0], destination)]
-            if destination.exists() and not messagebox.askyesno("Файл уже існує", f"Перезаписати файл?\n\n{destination}"):
+            if destination.exists() and not messagebox.askyesno("File already exists", f"Overwrite this file?\n\n{destination}"):
                 return
 
         self.busy = True
         self.process_button.configure(state="disabled")
         if batch:
             self.progress.configure(mode="determinate", maximum=len(jobs), value=0)
-            self.status_var.set(f"Обробляю 0 / {len(jobs)}…")
+            self.status_var.set(f"Processing 0 / {len(jobs)}…")
         else:
             self.progress.configure(mode="indeterminate")
             self.progress.start(12)
-            self.status_var.set("Обробляю зображення…")
+            self.status_var.set("Processing images…")
 
         def worker() -> None:
             errors: list[tuple[Path, str]] = []
@@ -499,10 +499,10 @@ class ImageMagickGUI(tk.Tk):
                     if result.returncode == 0 and output.exists():
                         completed += 1
                     else:
-                        error = result.stderr.strip() or result.stdout.strip() or "ImageMagick повернув невідому помилку."
+                        error = result.stderr.strip() or result.stdout.strip() or "ImageMagick returned an unknown error."
                         errors.append((source, error))
                 except subprocess.TimeoutExpired:
-                    errors.append((source, "Обробка триває надто довго й була зупинена після 5 хвилин."))
+                    errors.append((source, "Processing took too long and was stopped after 5 minutes."))
                 except OSError as exc:
                     errors.append((source, str(exc)))
 
@@ -528,48 +528,48 @@ class ImageMagickGUI(tk.Tk):
                         self.preview_photo = tk.PhotoImage(file=str(preview_path))
                         self.preview.configure(image=self.preview_photo, text="")
                     except tk.TclError:
-                        self.preview.configure(image="", text="Не вдалося показати прев’ю")
+                        self.preview.configure(image="", text="Could not display preview")
                 elif kind == "preview_error":
-                    self.preview.configure(image="", text="Не вдалося показати прев’ю")
+                    self.preview.configure(image="", text="Could not display preview")
                 elif kind == "progress":
                     completed, total, current_name = payload
                     self.progress.configure(value=completed)
-                    self.status_var.set(f"Обробляю {completed} / {total}: {current_name}")
+                    self.status_var.set(f"Processing {completed} / {total}: {current_name}")
                 elif kind == "done":
                     output = Path(payload)
                     self.busy = False
                     self.process_button.configure(state="normal")
                     self.progress.stop()
                     self.progress.configure(mode="indeterminate", value=0)
-                    self.status_var.set(f"Готово: {output.name}  •  {human_size(output.stat().st_size)}")
-                    messagebox.showinfo("Готово", f"Зображення збережено:\n\n{output}")
+                    self.status_var.set(f"Done: {output.name}  •  {human_size(output.stat().st_size)}")
+                    messagebox.showinfo("Done", f"Image saved to:\n\n{output}")
                 elif kind == "done_batch":
                     completed, total, errors, output_dir = payload
                     self.busy = False
                     self.process_button.configure(state="normal")
                     self.progress.stop()
                     self.progress.configure(mode="indeterminate", value=0)
-                    self.status_var.set(f"Готово: {completed} / {total} файлів")
+                    self.status_var.set(f"Done: {completed} / {total} files")
                     if errors:
                         error_lines = "\n".join(f"• {path.name}: {error[:180]}" for path, error in errors[:5])
                         if len(errors) > 5:
-                            error_lines += f"\n• … та ще {len(errors) - 5} помилок"
+                            error_lines += f"\n• … and {len(errors) - 5} more errors"
                         messagebox.showwarning(
-                            "Пакетну обробку завершено",
-                            f"Успішно оброблено: {completed} / {total}\n\nПапка результатів:\n{output_dir}\n\nПомилки:\n{error_lines}",
+                            "Batch processing completed",
+                            f"Successfully processed: {completed} / {total}\n\nOutput folder:\n{output_dir}\n\nErrors:\n{error_lines}",
                         )
                     else:
                         messagebox.showinfo(
-                            "Пакетну обробку завершено",
-                            f"Оброблено файлів: {completed}\n\nРезультати збережено в:\n{output_dir}",
+                            "Batch processing completed",
+                            f"Files processed: {completed}\n\nOutputs saved to:\n{output_dir}",
                         )
                 elif kind == "error":
                     self.busy = False
                     self.process_button.configure(state="normal")
                     self.progress.stop()
                     self.progress.configure(mode="indeterminate", value=0)
-                    self.status_var.set("Помилка обробки")
-                    messagebox.showerror("ImageMagick повідомляє про помилку", str(payload))
+                    self.status_var.set("Processing error")
+                    messagebox.showerror("ImageMagick reported an error", str(payload))
         except queue.Empty:
             pass
         self.after(100, self._poll_worker)
