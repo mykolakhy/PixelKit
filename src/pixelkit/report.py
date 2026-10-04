@@ -35,16 +35,22 @@ class FileResult:
     before: int | None
     after: int | None
     error: str | None = None
+    stopped: str | None = None
 
     @property
     def succeeded(self) -> bool:
-        return self.error is None and self.before is not None and self.after is not None
+        return self.stopped is None and self.error is None and self.before is not None and self.after is not None
+
+    @property
+    def status(self) -> str:
+        return self.stopped or ("Done" if self.succeeded else "Failed")
 
 
 @dataclass(frozen=True)
 class BatchReport:
     files: tuple[FileResult, ...]
     output_dir: Path
+    cancelled: bool = False
 
     @property
     def successful(self) -> tuple[FileResult, ...]:
@@ -82,7 +88,7 @@ class ReportDialog(QDialog):
         summary.setObjectName("reportSummary")
         summary.setWordWrap(True)
         layout.addWidget(summary)
-        status = QLabel(f"Successful: {count} / {len(report.files)}. Totals include successful files only.")
+        status = QLabel(("Batch cancelled. " if report.cancelled else "") + f"Successful: {count} / {len(report.files)}. Totals include successful files only.")
         status.setWordWrap(True)
         layout.addWidget(status)
 
@@ -98,7 +104,7 @@ class ReportDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for row, file in enumerate(report.files):
-            values = [file.source.name, file.output.suffix.lstrip(".").upper(), human_size(file.before) if file.before is not None else "—", human_size(file.after) if file.succeeded else "—", size_change(file.before, file.after) if file.succeeded else "—", "Done" if file.succeeded else "Failed"]
+            values = [file.source.name, file.output.suffix.lstrip(".").upper(), human_size(file.before) if file.before is not None else "—", human_size(file.after) if file.succeeded else "—", size_change(file.before, file.after) if file.succeeded else "—", file.status]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(file.error if column == 5 and file.error else str(file.source if column == 0 else file.output))

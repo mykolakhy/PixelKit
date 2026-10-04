@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -65,12 +66,44 @@ def magick_environment(executable: str, environment: dict[str, str] | None = Non
     return env
 
 
+class ProcessingCancelled(Exception):
+    """The caller requested that the active conversion stop."""
+
+
 def run_magick(command: list[str], **kwargs):
+    cancelled = kwargs.pop("cancel_requested", None)
     if sys.platform == "win32":
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         if flags:
             kwargs["creationflags"] = flags
     kwargs["env"] = magick_environment(command[0], kwargs.get("env"))
+    if cancelled is not None:
+        if cancelled():
+            raise ProcessingCancelled()
+        timeout = kwargs.pop("timeout", None)
+        if kwargs.pop("capture_output", False):
+            kwargs.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        with subprocess.Popen(command, **kwargs) as process:
+            try:
+                while True:
+                    if cancelled():
+                        raise ProcessingCancelled()
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(command, timeout)
+                    try:
+                        stdout, stderr = process.communicate(timeout=0.1)
+                        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.communicate(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.communicate()
     return subprocess.run(command, **kwargs)
 
 

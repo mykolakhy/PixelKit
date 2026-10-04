@@ -12,6 +12,7 @@ from PyQt6.QtWidgets import QMessageBox
 from pixelkit.app import BatchWorker, ImageMagickStudio, PixelKitApplication
 from pixelkit.runtime import find_magick, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, PresetStore
+from pixelkit.report import BatchReport
 
 
 class ApplicationTests(unittest.TestCase):
@@ -129,6 +130,22 @@ class ApplicationTests(unittest.TestCase):
         self.window.output_edit.textEdited.emit(destination)
         self.window.format_combo.setCurrentText("JPG")
         self.assertEqual(self.window.output_edit.text(), destination)
+
+    def test_cancel_button_requests_stop_and_restores_controls_after_report(self):
+        self.window.worker = BatchWorker([], self.root)
+        self.window._set_processing_state(True)
+        self.assertFalse(self.window.cancel_button.isHidden())
+        self.window.cancel_button.click()
+        self.assertTrue(self.window.worker.cancel_event.is_set())
+        self.assertFalse(self.window.cancel_button.isEnabled())
+        self.assertFalse(self.window.width_edit.isEnabled())
+        report = BatchReport((), self.root, cancelled=True)
+        with patch("pixelkit.app.ReportDialog") as dialog:
+            self.window._processing_finished(report)
+            dialog.assert_called_once_with(report, self.window)
+        self.assertTrue(self.window.cancel_button.isHidden())
+        self.assertTrue(self.window.width_edit.isEnabled())
+        self.assertIn("Cancelled", self.window.status_label.full_text)
 
     def test_builtin_preset_applies_to_all_batch_commands(self):
         files = [self.root / "first.png", self.root / "second.jpg"]

@@ -88,7 +88,11 @@ class ReportTests(unittest.TestCase):
         worker = BatchWorker([(["magick", str(source), str(output)], output)], self.root)
         reports = []
         worker.finished.connect(reports.append)
-        with patch("pixelkit.app.run_magick", return_value=SimpleNamespace(returncode=0, stderr="", stdout="")):
+        def convert(command, **kwargs):
+            Path(command[-1]).write_bytes(b"out")
+            return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with patch("pixelkit.app.run_magick", side_effect=convert):
             worker.start()
             self.assertTrue(worker.wait(5000))
             self.app.processEvents()

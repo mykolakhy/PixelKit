@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import subprocess
+import shutil
 import sys
+import tempfile
+from threading import Event
 from pathlib import Path
 
 from PyQt6.QtCore import QEvent, QThread, QTimer, Qt, QSize, pyqtSignal
@@ -31,7 +34,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from pixelkit.runtime import find_magick, missing_magick_message, resource_path, run_magick
+from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
@@ -156,28 +159,55 @@ class BatchWorker(QThread):
         super().__init__()
         self.jobs = jobs
         self.output_dir = output_dir
+        self.cancel_event = Event()
+
+    def cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         files = []
         for index, (command, output) in enumerate(self.jobs, start=1):
+            if self.cancel_event.is_set():
+                files.append(FileResult(Path(command[1]), output, None, None, "Not processed because the batch was cancelled.", "Skipped"))
+                continue
             source_name = Path(command[1]).name
             before = None
             after = None
             error = None
+            stopped = None
+            temporary = None
+            temporary_dir = None
             try:
                 before = Path(command[1]).stat().st_size
-                result = run_magick(command, capture_output=True, text=True, timeout=300)
-                if result.returncode == 0 and output.is_file():
-                    after = output.stat().st_size
+                # Publish only a completed conversion, preserving any existing
+                # destination and removing partial files when cancelled.
+                temporary_dir = Path(tempfile.mkdtemp(prefix=".pixelkit-", dir=output.parent))
+                temporary = temporary_dir / output.name
+                converted_command = [*command[:-1], str(temporary)]
+                result = run_magick(converted_command, capture_output=True, text=True, timeout=300, cancel_requested=self.cancel_event.is_set)
+                if self.cancel_event.is_set():
+                    raise ProcessingCancelled()
+                if result.returncode == 0 and temporary.is_file():
+                    after = temporary.stat().st_size
+                    temporary.replace(output)
                 else:
                     error = result.stderr.strip() or result.stdout.strip() or "ImageMagick returned an unknown error."
+            except ProcessingCancelled:
+                error = "Processing cancelled. No partial output was saved."
+                stopped = "Cancelled"
             except subprocess.TimeoutExpired:
                 error = "Processing exceeded the 5-minute limit."
             except OSError as exc:
                 error = str(exc)
-            files.append(FileResult(Path(command[1]), output, before, after, error))
+            finally:
+                if temporary_dir is not None:
+                    try:
+                        shutil.rmtree(temporary_dir)
+                    except OSError as exc:
+                        error = f"{error or 'Conversion completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
+            files.append(FileResult(Path(command[1]), output, before, after, error, stopped))
             self.progress.emit(index, len(self.jobs), source_name)
-        self.finished.emit(BatchReport(tuple(files), self.output_dir))
+        self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
 
 
 class ImageMagickStudio(QMainWindow):
@@ -355,6 +385,11 @@ class ImageMagickStudio(QMainWindow):
         self.progress.setFixedHeight(8)
         self.progress.hide()
         footer.addWidget(self.progress)
+        self.cancel_button = QPushButton("Cancel processing")
+        self.cancel_button.setAccessibleName("Cancel image processing")
+        self.cancel_button.clicked.connect(self._cancel_processing)
+        self.cancel_button.hide()
+        footer.addWidget(self.cancel_button)
         outer.addLayout(footer)
         self.output_edit.textChanged.connect(self._output_path_changed)
         self.output_edit.textEdited.connect(lambda _text: setattr(self, "default_output", False))
@@ -814,7 +849,17 @@ class ImageMagickStudio(QMainWindow):
         for widget in (self.source_card, self.resize_card, self.quality_card, self.format_combo, self.output_edit, self.output_button):
             widget.setEnabled(not processing)
         self.process_button.setText("Processing…" if processing else "Process and save")
+        self.cancel_button.setVisible(processing)
+        self.cancel_button.setEnabled(processing)
+        self.cancel_button.setText("Cancel processing")
         self._update_action_state()
+
+    def _cancel_processing(self) -> None:
+        if self.worker and self.processing:
+            self.worker.cancel()
+            self.cancel_button.setEnabled(False)
+            self.cancel_button.setText("Cancelling…")
+            self._set_status("Cancelling… Completed files will be kept.")
 
     def _show_message(
         self,
@@ -1102,12 +1147,13 @@ class ImageMagickStudio(QMainWindow):
 
     def _set_progress(self, current: int, total: int, name: str) -> None:
         self.progress.setValue(current)
-        self._set_status(f"Processing {current} / {total}: {name}")
+        if not self.worker or not self.worker.cancel_event.is_set():
+            self._set_status(f"Processing {current} / {total}: {name}")
 
     def _processing_finished(self, report: BatchReport) -> None:
         self._set_processing_state(False)
         self.progress.hide()
-        self._set_status(f"Done: {len(report.successful)} / {len(report.files)} files")
+        self._set_status(f"{'Cancelled' if report.cancelled else 'Done'}: {len(report.successful)} / {len(report.files)} files")
         ReportDialog(report, self).exec()
 
 
