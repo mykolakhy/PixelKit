@@ -34,20 +34,12 @@ from PyQt6.QtWidgets import (
 from pixelkit.runtime import find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
+from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
 
 
 APP_TITLE = "PixelKit"
 ICON_PATH = resource_path("PixelKit.png")
 SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico"}
-
-
-def human_size(value: int) -> str:
-    size = float(value)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
-            return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
-        size /= 1024
-    return f"{value} B"
 
 
 class ElidedLabel(QLabel):
@@ -158,7 +150,7 @@ class DropListWidget(QListWidget):
 
 class BatchWorker(QThread):
     progress = pyqtSignal(int, int, str)
-    finished = pyqtSignal(int, int, list, str)
+    finished = pyqtSignal(object)
 
     def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path) -> None:
         super().__init__()
@@ -166,23 +158,26 @@ class BatchWorker(QThread):
         self.output_dir = output_dir
 
     def run(self) -> None:
-        completed = 0
-        errors: list[tuple[str, str]] = []
+        files = []
         for index, (command, output) in enumerate(self.jobs, start=1):
             source_name = Path(command[1]).name
+            before = None
+            after = None
+            error = None
             try:
+                before = Path(command[1]).stat().st_size
                 result = run_magick(command, capture_output=True, text=True, timeout=300)
-                if result.returncode == 0 and output.exists():
-                    completed += 1
+                if result.returncode == 0 and output.is_file():
+                    after = output.stat().st_size
                 else:
                     error = result.stderr.strip() or result.stdout.strip() or "ImageMagick returned an unknown error."
-                    errors.append((source_name, error))
             except subprocess.TimeoutExpired:
-                errors.append((source_name, "Processing exceeded the 5-minute limit."))
+                error = "Processing exceeded the 5-minute limit."
             except OSError as exc:
-                errors.append((source_name, str(exc)))
+                error = str(exc)
+            files.append(FileResult(Path(command[1]), output, before, after, error))
             self.progress.emit(index, len(self.jobs), source_name)
-        self.finished.emit(completed, len(self.jobs), errors, str(self.output_dir))
+        self.finished.emit(BatchReport(tuple(files), self.output_dir))
 
 
 class ImageMagickStudio(QMainWindow):
@@ -1109,17 +1104,11 @@ class ImageMagickStudio(QMainWindow):
         self.progress.setValue(current)
         self._set_status(f"Processing {current} / {total}: {name}")
 
-    def _processing_finished(self, completed: int, total: int, errors: list, output_dir: str) -> None:
+    def _processing_finished(self, report: BatchReport) -> None:
         self._set_processing_state(False)
         self.progress.hide()
-        self._set_status(f"Done: {completed} / {total} files")
-        if errors:
-            lines = "\n".join(f"• {name}: {message[:180]}" for name, message in errors[:5])
-            if len(errors) > 5:
-                lines += f"\n• … and {len(errors) - 5} more errors"
-            self._show_message(QMessageBox.Icon.Warning, "Processing completed with errors", f"Successful: {completed} / {total}\n\nOutputs: {output_dir}\n\n{lines}")
-        else:
-            self._show_message(QMessageBox.Icon.Information, "Done", f"Files processed: {completed}\n\nOutputs saved to:\n{output_dir}")
+        self._set_status(f"Done: {len(report.successful)} / {len(report.files)} files")
+        ReportDialog(report, self).exec()
 
 
 def main() -> None:

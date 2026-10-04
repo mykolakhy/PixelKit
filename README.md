@@ -24,6 +24,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, and its codecs. Apple S
 - On macOS: native menu shortcuts and image opening through Finder's **Open With** or the Dock icon.
 - All processing is performed locally on your computer.
 - Built-in processing presets and your own saved presets, available after restarting the app.
+- Compression report after each batch: before/after sizes, savings, per-file formats and errors, and an output-folder shortcut. Totals include successful files only; larger outputs are shown explicitly.
 
 ## Presets
 
@@ -72,6 +73,7 @@ src/pixelkit/       Application package and bundled icons
   presets.py       Built-in presets and saved preferences
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets
+  report.py        Per-file results and compression report
   assets/          Logo, Windows icon, and SVG controls
 packaging/         Platform-specific build configuration and installer
 scripts/           macOS builder and bundle verification
