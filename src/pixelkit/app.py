@@ -553,15 +553,6 @@ class ImageMagickStudio(QMainWindow):
         layout.addWidget(note)
         return widget
 
-    def _card(self, layout: QVBoxLayout) -> QFrame:
-        card = QFrame()
-        card.setObjectName("card")
-        card_layout = QVBoxLayout(card)
-        card_layout.setContentsMargins(20, 18, 20, 20)
-        card_layout.setSpacing(12)
-        layout.addWidget(card)
-        return card
-
     def _source_card(self) -> QFrame:
         card = QFrame()
         card.setObjectName("card")

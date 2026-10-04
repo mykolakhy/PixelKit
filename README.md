@@ -7,7 +7,7 @@ A Windows and macOS desktop app for local batch image resizing, compression, and
 Application bundles and installers belong in `dist/`, outside version control.
 
 - **macOS:** build a disk image using the [macOS instructions](packaging/macos/README.md), or download the matching artifact from a completed **macOS app** GitHub Actions run. Open the DMG and drag PixelKit into Applications.
-- **Windows:** the previous installer is retained locally at `dist/windows/PixelKit-Setup.exe`. It predates the latest interface changes. The [Windows packaging instructions](packaging/windows/README.md) describe building an installer from the current source on Windows.
+- **Windows:** build the app and installer from the current source on Windows using the [Windows packaging instructions](packaging/windows/README.md).
 
 The packaged macOS app includes Python, Qt, ImageMagick, and its codecs. Apple Silicon and Intel builds are separate; the build host's macOS major version is the minimum supported version. See the packaging instructions for signing and distribution.
 
@@ -52,8 +52,6 @@ python3.12 -m venv .venv
 .venv/bin/python -m pixelkit
 ```
 
-You can also double-click `scripts/launch_macos.command` after installation.
-
 ### Windows
 
 Install ImageMagick 7 with its executable available in PATH, then run:
@@ -64,7 +62,7 @@ py -3 -m venv .venv
 .venv\Scripts\python -m pixelkit
 ```
 
-After installation, `scripts/launch_windows.cmd` launches the app without a console window. Installing the package also provides the `pixelkit` command inside the virtual environment.
+Installing the package also provides the `pixelkit` command inside the virtual environment.
 
 ## Repository layout
 
@@ -76,18 +74,17 @@ src/pixelkit/       Application package and bundled icons
   widgets.py       Shared dropdown widgets
   assets/          Logo, Windows icon, and SVG controls
 packaging/         Platform-specific build configuration and installer
-scripts/           Source launchers, macOS builder, and bundle verification
+scripts/           macOS builder and bundle verification
 tests/             Application, preset, and runtime checks
-docs/              Development notes
 .github/workflows/ macOS build automation
 pyproject.toml     Dependencies, package metadata, and launch command
 ```
 
-`build/` contains disposable build intermediates; `dist/` contains local deliverables. Both are ignored by Git. The old `outputs/` layout and the unsupported Tkinter editor have been removed. The Windows installer's Tkinter interface remains in `packaging/windows/installer.py`.
+Dependencies are declared in `pyproject.toml`; the version is declared in `src/pixelkit/__init__.py`. `build/` contains disposable build intermediates; `dist/` contains local deliverables. Both are ignored by Git. Close any app launched from `dist/` before removing or rebuilding that bundle.
 
 ## Development and validation
 
-See [development notes](docs/development.md), [macOS packaging](packaging/macos/README.md), and [Windows packaging](packaging/windows/README.md).
+See [macOS packaging](packaging/macos/README.md) and [Windows packaging](packaging/windows/README.md). Install with `pip install -e '.[build]'` to include the optional PyInstaller dependency for native builds.
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v

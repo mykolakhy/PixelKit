@@ -19,10 +19,6 @@ Install ImageMagick 7 and place a complete matching Windows runtime in `C:\Image
 
 The first build produces `dist/windows/PixelKit/PixelKit.exe`. Verify this app on Windows before creating or distributing the installer. The second build produces `dist/windows/PixelKit-Setup.exe`, bundling the entire app folder as its payload.
 
-The installer copies its payload to `%LOCALAPPDATA%/Programs/PixelKit`, creates shortcuts, and offers to launch the app. Source launchers use the repository's `.venv`, with no machine-specific Python paths.
-
-## Local legacy installer
-
-The original prebuilt installer was moved out of `outputs/` into ignored `dist/windows/PixelKit-Setup.exe` during repository cleanup. It has not been rebuilt with the current interface. Preserve or rename it before building a replacement if you still need that version. It also remains recoverable from Git history.
+The installer copies its payload to `%LOCALAPPDATA%/Programs/PixelKit`, creates shortcuts, and offers to launch the app.
 
 Native Windows packaging and installation cannot be verified on macOS. Before publishing, check the standalone app on a Windows machine without Python or ImageMagick, run real conversions, and test installation and shortcuts.
