@@ -28,6 +28,8 @@ The packaged macOS app includes Python, Qt, ImageMagick, and its codecs. Apple S
 - Cancel an active batch: stop the current conversion, preserve completed files, and see cancelled/skipped files in the report. Partial output files are removed; existing destinations are replaced only after a conversion succeeds.
 - Limit each output to a requested size for JPG, WEBP or AVIF. Enable **Limit file size**, enter a limit in KiB (1 KiB = 1024 bytes), and select a supported output format. Quality is searched automatically up to the slider's **Max quality**; image dimensions and other settings stay as configured. Unreachable limits are reported without publishing an oversized file. Custom presets retain the limit.
 
+- Compare an original with its processed output: select a successful row in the report and click **Compare images**. Move the before/after divider, choose **Fit to window**, or inspect at **100%** (one result pixel per physical display pixel). Resized originals are aligned to the result dimensions; animations show the first frame. Full-resolution comparison supports images up to 32 megapixels.
+
 ## Presets
 
 Choose a preset above the image settings to apply it to every input image:
@@ -76,6 +78,7 @@ src/pixelkit/       Application package and bundled icons
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets
   report.py        Per-file results and compression report
+  comparison.py    On-demand original/result comparison
   assets/          Logo, Windows icon, and SVG controls
 packaging/         Platform-specific build configuration and installer
 scripts/           macOS builder and bundle verification

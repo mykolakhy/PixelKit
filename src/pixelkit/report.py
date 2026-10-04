@@ -1,12 +1,15 @@
 """Per-file processing results and the compression report dialog."""
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QAbstractItemView, QDialog, QHeaderView, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
+
+from pixelkit.comparison import ComparisonDialog
 
 
 def human_size(value: int) -> str:
@@ -123,6 +126,10 @@ class ReportDialog(QDialog):
         self.open_folder.setEnabled(report.output_dir.is_dir())
         self.open_folder.clicked.connect(self._open_output_folder)
         buttons.addWidget(self.open_folder)
+        self.compare_button = QPushButton("Compare images")
+        self.compare_button.setEnabled(False)
+        self.compare_button.clicked.connect(self._compare_images)
+        buttons.addWidget(self.compare_button)
         buttons.addStretch()
         close = QPushButton("Close")
         close.setDefault(True)
@@ -132,11 +139,29 @@ class ReportDialog(QDialog):
 
     def _selection_changed(self) -> None:
         row = self.table.currentRow()
+        self.compare_button.setEnabled(False)
         if row >= 0:
             file = self.report.files[row]
             quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
             self.details.setPlainText(file.error or (str(file.output) + quality))
             self.details.setToolTip(file.error or str(file.output))
+            self.compare_button.setEnabled(file.succeeded and file.source.is_file() and file.output.is_file())
+
+    def _compare_images(self) -> None:
+        row = self.table.currentRow()
+        if row < 0:
+            return
+        file = self.report.files[row]
+        if not file.succeeded:
+            return
+        try:
+            dialog = ComparisonDialog(file.source, file.output, self)
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+        except (ValueError, OSError, subprocess.TimeoutExpired) as exc:
+            self.details.setPlainText(f"Could not open image comparison:\n{exc}")
 
     def _open_output_folder(self) -> None:
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.report.output_dir.resolve()))):
