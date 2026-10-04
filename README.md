@@ -78,7 +78,7 @@ src/pixelkit/       Application package and bundled icons
 packaging/         Platform-specific build configuration and installer
 scripts/           Source launchers, macOS builder, and bundle verification
 tests/             Application, preset, and runtime checks
-docs/              Development notes and archived visual audit
+docs/              Development notes
 .github/workflows/ macOS build automation
 pyproject.toml     Dependencies, package metadata, and launch command
 ```
@@ -87,7 +87,7 @@ pyproject.toml     Dependencies, package metadata, and launch command
 
 ## Development and validation
 
-See [development notes](docs/development.md), [macOS packaging](packaging/macos/README.md), [Windows packaging](packaging/windows/README.md), and the [visual audit](docs/visual-audit/README.md).
+See [development notes](docs/development.md), [macOS packaging](packaging/macos/README.md), and [Windows packaging](packaging/windows/README.md).
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -v

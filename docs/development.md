@@ -35,5 +35,3 @@ Saved presets use the existing native user preferences. Moving source files does
 ## Cleaning local outputs
 
 Close any app launched from `dist/` before removing or rebuilding that bundle. `build/` is disposable; `dist/` can be removed when its installers are no longer needed. Keep `.venv/` while developing. None of these folders is part of the source tree tracked by Git.
-
-The visual audit is an archived report of the October 3, 2026 interface; its screenshots document that historical state, before the later preset and dropdown changes.
