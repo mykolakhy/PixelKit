@@ -29,6 +29,7 @@ class Preset:
     strip_metadata: bool = True
     background: str = "#ffffff"
     output_format: str = "Automatic"
+    target_kib: int | None = None
 
     def __post_init__(self) -> None:
         if self.resize_mode not in ("dimensions", "longest_side"):
@@ -44,6 +45,8 @@ class Preset:
             raise ValueError("Enter a JPEG background color before saving a preset.")
         if self.output_format not in OUTPUT_FORMATS:
             raise ValueError("Choose a supported output format.")
+        if self.target_kib is not None and (type(self.target_kib) is not int or not 1 <= self.target_kib <= 1000000):
+            raise ValueError("File-size limit must be between 1 and 1000000 KiB.")
 
     def description(self) -> str:
         if self.resize_mode == "longest_side" and self.longest_side:
@@ -52,7 +55,8 @@ class Preset:
             size = f"{self.width or 'Original'} × {self.height or 'Original'} px"
         else:
             size = "Original dimensions"
-        return f"{self.output_format} • {size} • Quality {self.quality}"
+        target = f" • ≤ {self.target_kib} KiB" if self.target_kib else ""
+        return f"{self.output_format} • {size} • Quality {self.quality}{target}"
 
 
 BUILTIN_PRESETS = {

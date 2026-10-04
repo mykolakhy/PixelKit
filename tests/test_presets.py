@@ -49,6 +49,15 @@ class PresetStoreTests(unittest.TestCase):
             self.store.save({"My preset": Preset()})
         self.assertEqual(self.store.load(), {})
 
+    def test_target_limit_persists_and_older_presets_default_to_no_limit(self):
+        self.store.save({"Small images": Preset(output_format="WEBP", target_kib=500)})
+        self.assertEqual(self.store.load()["Small images"].target_kib, 500)
+        self.settings.setValue(self.store.KEY, '{"version":1,"presets":{"Old":{"quality":80}}}')
+        self.assertIsNone(self.store.load()["Old"].target_kib)
+        for value in (0, -1, True, 1000001):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                Preset(target_kib=value)
+
 
 if __name__ == "__main__":
     unittest.main()

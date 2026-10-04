@@ -36,6 +36,7 @@ class FileResult:
     after: int | None
     error: str | None = None
     stopped: str | None = None
+    quality: int | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -133,7 +134,8 @@ class ReportDialog(QDialog):
         row = self.table.currentRow()
         if row >= 0:
             file = self.report.files[row]
-            self.details.setPlainText(file.error or str(file.output))
+            quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
+            self.details.setPlainText(file.error or (str(file.output) + quality))
             self.details.setToolTip(file.error or str(file.output))
 
     def _open_output_folder(self) -> None:
