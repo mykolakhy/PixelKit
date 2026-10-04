@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pixelkit"
+dynamic = ["version"]
+description = "Windows and macOS desktop GUI for local batch image processing"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["PyQt6>=6.8,<7"]
+
+[project.optional-dependencies]
+build = ["PyInstaller>=6.11,<7"]
+
+[project.gui-scripts]
+pixelkit = "pixelkit.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pixelkit = ["assets/*.png", "assets/*.ico", "assets/*.svg"]
+
+[tool.setuptools.dynamic]
+version = {attr = "pixelkit.__version__"}
