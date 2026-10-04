@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # Local packaging and test artifacts
 work/
@@ -12,7 +13,4 @@ dist/
 .vscode/
 Thumbs.db
 Desktop.ini
-
-# Local Git metadata fallback used by the workspace
-.pixelkit-git/
-.pixelkit-index
+.DS_Store
