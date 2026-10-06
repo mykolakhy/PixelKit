@@ -12,6 +12,7 @@ from pathlib import Path
 
 from pixelkit import __version__
 from pixelkit.runtime import find_magick
+from pixelkit.video import find_ffmpeg
 
 PROJECT = Path(__file__).resolve().parents[1]
 
@@ -36,6 +37,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", default=__version__)
     parser.add_argument("--magick-prefix", type=Path, help="ImageMagick installation prefix (normally detected automatically)")
+    parser.add_argument("--ffmpeg-prefix", type=Path, help="FFmpeg installation prefix containing bin/ffmpeg and bin/ffprobe")
     parser.add_argument("--no-dmg", action="store_true", help="Build only the app bundle")
     parser.add_argument("--output-dir", type=Path, default=PROJECT / "dist" / "macos", help="Directory for architecture-specific builds")
     args = parser.parse_args()
@@ -54,17 +56,28 @@ def main() -> None:
         prefix = Path(magick).resolve().parent.parent
     if prefix is None or not (prefix / "bin" / "magick").is_file() or not (prefix / "etc").is_dir():
         parser.error("Install ImageMagick 7 with 'brew install imagemagick', or pass --magick-prefix.")
+    ffmpeg = find_ffmpeg()
+    ffmpeg_prefix = args.ffmpeg_prefix.resolve() if args.ffmpeg_prefix else Path(ffmpeg).resolve().parent.parent if ffmpeg else None
+    if ffmpeg_prefix is None or not all((ffmpeg_prefix / "bin" / name).is_file() for name in ("ffmpeg", "ffprobe")):
+        parser.error("Install FFmpeg with 'brew install ffmpeg', or pass --ffmpeg-prefix. Both ffmpeg and ffprobe are required.")
     # Fail early if the runtime does not contain the target architecture.
-    architectures = subprocess.check_output(["lipo", "-archs", str(prefix / "bin" / "magick")], text=True).split()
-    if arch not in architectures:
-        parser.error(f"ImageMagick has {architectures}, but Python is running as {arch}.")
+    for name, executable in (("ImageMagick", prefix / "bin" / "magick"), ("FFmpeg", ffmpeg_prefix / "bin" / "ffmpeg"), ("FFprobe", ffmpeg_prefix / "bin" / "ffprobe")):
+        architectures = subprocess.check_output(["lipo", "-archs", str(executable)], text=True).split()
+        if arch not in architectures:
+            parser.error(f"{name} has {architectures}, but Python is running as {arch}.")
+    encoders = subprocess.check_output([str(ffmpeg_prefix / "bin" / "ffmpeg"), "-hide_banner", "-encoders"], text=True)
+    encoder_names = {fields[1] for line in encoders.splitlines() if len(fields := line.split()) > 1}
+    if not {"libx264", "aac"}.issubset(encoder_names):
+        parser.error("The FFmpeg runtime must include the libx264 video and AAC audio encoders.")
     work = PROJECT / "build" / "macos" / arch
     dist = args.output_dir.resolve() / arch
     work.mkdir(parents=True, exist_ok=True)
     dist.mkdir(parents=True, exist_ok=True)
     icon = make_icon(work)
+    build_information = subprocess.check_output([str(ffmpeg_prefix / "bin" / "ffmpeg"), "-version"], text=True)
+    (work / "ffmpeg-build.txt").write_text(build_information, encoding="utf-8")
     minimum_version = platform.mac_ver()[0].split(".")[0] + ".0"
-    env = dict(os.environ, PIXELKIT_MAGICK_PREFIX=str(prefix), PIXELKIT_MACOS_ICON=str(icon), PIXELKIT_VERSION=args.version, PIXELKIT_ARCH=arch, PIXELKIT_MACOS_MIN_VERSION=minimum_version, PYINSTALLER_CONFIG_DIR=str(work / "cache"))
+    env = dict(os.environ, PIXELKIT_MAGICK_PREFIX=str(prefix), PIXELKIT_FFMPEG_PREFIX=str(ffmpeg_prefix), PIXELKIT_MACOS_ICON=str(icon), PIXELKIT_VERSION=args.version, PIXELKIT_ARCH=arch, PIXELKIT_MACOS_MIN_VERSION=minimum_version, PYINSTALLER_CONFIG_DIR=str(work / "cache"))
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--distpath", str(dist), "--workpath", str(work / "pyinstaller"), str(PROJECT / "packaging" / "macos" / "PixelKit.spec")], env=env, cwd=PROJECT)
     app = dist / "PixelKit.app"
     # Validate all embedded signatures before making the disk image.

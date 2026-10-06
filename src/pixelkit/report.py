@@ -40,6 +40,8 @@ class FileResult:
     error: str | None = None
     stopped: str | None = None
     quality: int | None = None
+    media_type: str = "image"
+    elapsed_seconds: float | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -96,9 +98,10 @@ class ReportDialog(QDialog):
         status.setWordWrap(True)
         layout.addWidget(status)
 
-        self.table = QTableWidget(len(report.files), 6)
-        self.table.setAccessibleName("Processing results for each image")
-        self.table.setHorizontalHeaderLabels(["File", "Format", "Before", "After", "Change", "Result"])
+        video_report = any(file.media_type == "video" for file in report.files)
+        self.table = QTableWidget(len(report.files), 7 if video_report else 6)
+        self.table.setAccessibleName("Processing results for each file")
+        self.table.setHorizontalHeaderLabels(["File", "Format", "Before", "After", "Change", "Result"] + (["Time"] if video_report else []))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -109,6 +112,8 @@ class ReportDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for row, file in enumerate(report.files):
             values = [file.source.name, file.output.suffix.lstrip(".").upper(), human_size(file.before) if file.before is not None else "—", human_size(file.after) if file.succeeded else "—", size_change(file.before, file.after) if file.succeeded else "—", file.status]
+            if video_report:
+                values.append(f"{file.elapsed_seconds:.1f} s" if file.elapsed_seconds is not None else "—")
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(file.error if column == 5 and file.error else str(file.source if column == 0 else file.output))
@@ -128,6 +133,7 @@ class ReportDialog(QDialog):
         buttons.addWidget(self.open_folder)
         self.compare_button = QPushButton("Compare images")
         self.compare_button.setEnabled(False)
+        self.compare_button.setVisible(not video_report)
         self.compare_button.clicked.connect(self._compare_images)
         buttons.addWidget(self.compare_button)
         buttons.addStretch()
@@ -145,14 +151,14 @@ class ReportDialog(QDialog):
             quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
             self.details.setPlainText(file.error or (str(file.output) + quality))
             self.details.setToolTip(file.error or str(file.output))
-            self.compare_button.setEnabled(file.succeeded and file.source.is_file() and file.output.is_file())
+            self.compare_button.setEnabled(file.media_type == "image" and file.succeeded and file.source.is_file() and file.output.is_file())
 
     def _compare_images(self) -> None:
         row = self.table.currentRow()
         if row < 0:
             return
         file = self.report.files[row]
-        if not file.succeeded:
+        if not file.succeeded or file.media_type != "image":
             return
         try:
             dialog = ComparisonDialog(file.source, file.output, self)

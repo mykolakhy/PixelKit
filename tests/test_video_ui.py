@@ -1,0 +1,255 @@
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from PyQt6.QtCore import QSettings
+from PyQt6.QtGui import QCloseEvent
+from PyQt6.QtWidgets import QMessageBox
+
+from pixelkit.app import ImageMagickStudio, PixelKitApplication
+from pixelkit.presets import PresetStore
+from pixelkit.report import BatchReport, FileResult, ReportDialog
+
+
+class VideoUiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = PixelKitApplication.instance() or PixelKitApplication([])
+
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name).resolve()
+        store = PresetStore(QSettings(str(self.root / "presets.ini"), QSettings.Format.IniFormat))
+        message_patch = patch("pixelkit.app.ImageMagickStudio._show_message")
+        self.message = message_patch.start()
+        self.addCleanup(message_patch.stop)
+        with patch("pixelkit.app.find_magick", return_value="magick"), patch("pixelkit.video_panel.find_ffmpeg", return_value="ffmpeg"), patch("pixelkit.video_panel.find_ffprobe", return_value="ffprobe"):
+            self.window = ImageMagickStudio(store)
+        self.panel = self.window.video_panel
+        self.addCleanup(self.close_window)
+
+    def close_window(self):
+        for worker in (self.window.worker, self.panel.worker):
+            if isinstance(worker, Mock):
+                worker.isRunning.return_value = False
+        self.panel.processing = False
+        self.window.processing = False
+        self.window.close()
+
+    def video(self, name="input with spaces.mov"):
+        source = self.root / name
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(b"video fixture")
+        return source
+
+    def mock_worker(self):
+        worker = Mock()
+        worker.isRunning.return_value = False
+        return worker
+
+    def test_video_queue_filters_unsupported_and_missing_files_and_deduplicates(self):
+        first = self.video()
+        second = self.video("SECOND.MP4")
+        image = self.video("image.png")
+        self.panel.set_sources([first, first, image, self.root / "missing.mp4", second])
+        self.assertEqual(self.panel.sources, [first.resolve(), second.resolve()])
+        self.assertEqual(self.panel.source_list.count(), 2)
+        self.assertEqual(Path(self.panel.output_edit.text()), self.root / "optimized")
+        self.panel.set_sources([first])
+        self.assertEqual(Path(self.panel.output_edit.text()), first.with_name(first.stem + "_optimized.mp4"))
+
+    def test_video_processing_passes_preset_resolution_and_audio_for_each_file(self):
+        files = [self.video("first.mov"), self.video("second.mp4")]
+        self.panel.set_sources(files)
+        output = self.root / "chosen video folder"
+        self.panel.output_edit.setText(str(output))
+        self.panel.preset_combo.setCurrentIndex(self.panel.preset_combo.findData("small"))
+        self.panel.resolution_combo.setCurrentIndex(self.panel.resolution_combo.findData(720))
+        self.panel.audio_combo.setCurrentIndex(self.panel.audio_combo.findData("remove"))
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker) as construct:
+            self.panel.start_processing()
+        jobs, output_dir, settings = construct.call_args.args[:3]
+        self.assertEqual(jobs, [(file.resolve(), output / (file.stem + "_optimized.mp4")) for file in files])
+        self.assertEqual(output_dir, output)
+        self.assertEqual((settings.preset, settings.max_height, settings.audio), ("small", 720, "remove"))
+        worker.start.assert_called_once()
+        self.assertTrue(self.panel.processing)
+
+    def test_video_cannot_overwrite_its_original(self):
+        source = self.video("original.mp4")
+        self.panel.set_sources([source])
+        self.panel.output_edit.setText(str(source))
+        with patch("pixelkit.video_panel.VideoWorker") as worker:
+            self.panel.start_processing()
+        worker.assert_not_called()
+        self.assertIn("different from the original", self.message.call_args.args[2])
+        self.assertFalse(self.panel.processing)
+
+    def test_video_batch_assigns_distinct_output_names_and_preserves_existing_files(self):
+        first = self.video("one/clip.mov")
+        second = self.video("two/clip.mp4")
+        self.panel.set_sources([first, second])
+        output = self.root / "output"
+        output.mkdir()
+        existing = output / "clip_optimized.mp4"
+        existing.write_bytes(b"existing output")
+        self.panel.output_edit.setText(str(output))
+        with patch("pixelkit.video_panel.VideoWorker", return_value=self.mock_worker()) as worker:
+            self.panel.start_processing()
+        jobs = worker.call_args.args[0]
+        self.assertEqual([target.name for _, target in jobs], ["clip_optimized_2.mp4", "clip_optimized_3.mp4"])
+        self.assertEqual(existing.read_bytes(), b"existing output")
+        self.message.assert_not_called()
+
+    def test_video_batch_outputs_are_unique_on_case_insensitive_filesystems(self):
+        first = self.video("one/CLIP.mov")
+        second = self.video("two/clip.mp4")
+        self.panel.set_sources([first, second])
+        self.panel.output_edit.setText(str(self.root / "output"))
+        with patch("pixelkit.video_panel.VideoWorker", return_value=self.mock_worker()) as worker:
+            self.panel.start_processing()
+        outputs = [str(target).casefold() for _, target in worker.call_args.args[0]]
+        self.assertEqual(len(set(outputs)), 2)
+
+    def test_finder_open_selects_video_mode_and_mixed_files_preserve_queues(self):
+        source = self.video()
+        image = self.video("image.png")
+        self.window.open_files([source])
+        self.assertEqual(self.window.media_stack.currentIndex(), 1)
+        self.assertEqual(self.panel.sources, [source.resolve()])
+        self.window.open_files([image, source])
+        self.message.assert_called_once()
+        self.assertEqual(self.window.media_stack.currentIndex(), 1)
+        self.assertEqual(self.panel.sources, [source.resolve()])
+        self.assertEqual(self.window.sources, [])
+        self.window.open_files([image])
+        self.assertEqual(self.window.media_stack.currentIndex(), 0)
+        self.assertEqual(self.window.sources, [image.resolve()])
+        self.assertEqual(self.panel.sources, [source.resolve()])
+
+    def test_video_report_does_not_offer_image_comparison(self):
+        source = self.video()
+        output = self.video("processed.mp4")
+        file = FileResult(source, output, 100, 40, media_type="video", elapsed_seconds=1.5)
+        dialog = ReportDialog(BatchReport((file,), self.root))
+        self.addCleanup(dialog.close)
+        dialog.table.selectRow(0)
+        self.assertTrue(dialog.compare_button.isHidden())
+        self.assertFalse(dialog.compare_button.isEnabled())
+        with patch("pixelkit.report.ComparisonDialog") as comparison:
+            dialog._compare_images()
+        comparison.assert_not_called()
+        self.assertEqual(dialog.table.item(0, 6).text(), "1.5 s")
+
+    def test_video_cancel_locks_controls_until_finished_and_restores_report(self):
+        source = self.video()
+        self.panel.set_sources([source])
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker):
+            self.panel.start_processing()
+        self.assertTrue(all(not button.isEnabled() for button in self.window.mode_buttons))
+        for widget in (self.panel.source_list, self.panel.preset_combo, self.panel.resolution_combo, self.panel.audio_combo, self.panel.output_edit):
+            self.assertFalse(widget.isEnabled())
+        self.panel.cancel_button.click()
+        worker.cancel.assert_called_once()
+        self.assertFalse(self.panel.cancel_button.isEnabled())
+        self.assertTrue(self.panel.processing)
+        report = BatchReport((FileResult(source, self.root / "out.mp4", 100, None, stopped="Cancelled", media_type="video"),), self.root, cancelled=True)
+        with patch("pixelkit.video_panel.ReportDialog") as dialog:
+            self.panel._finished(report)
+        dialog.assert_called_once_with(report, self.panel)
+        dialog.return_value.exec.assert_called_once()
+        self.assertFalse(self.panel.processing)
+        self.assertTrue(self.panel.cancel_button.isHidden())
+        self.assertTrue(self.panel.process_button.isEnabled())
+        self.assertTrue(self.panel.report_button.isEnabled())
+        self.assertIs(self.panel.last_report, report)
+        self.assertTrue(all(button.isEnabled() for button in self.window.mode_buttons))
+        self.assertIn("Cancelled", self.panel.status.text())
+
+    def test_finder_cannot_replace_video_batch_and_close_is_blocked(self):
+        source = self.video("first.mov")
+        other = self.video("second.mp4")
+        self.window.open_files([source])
+        self.panel._set_busy(True)
+        self.window.open_files([other])
+        self.assertEqual(self.panel.sources, [source.resolve()])
+        self.message.assert_called_once()
+        self.message.reset_mock()
+        event = QCloseEvent()
+        self.window.closeEvent(event)
+        self.assertFalse(event.isAccepted())
+        self.message.assert_called_once()
+        self.panel._set_busy(False)
+
+    def test_image_processing_locks_media_switch_and_blocks_finder_video_open(self):
+        image = self.video("image.png")
+        source = self.video()
+        self.window._set_sources([image])
+        self.window._set_processing_state(True)
+        self.assertTrue(all(not button.isEnabled() for button in self.window.mode_buttons))
+        self.window.mode_buttons[1].click()
+        self.assertEqual(self.window.media_stack.currentIndex(), 0)
+        self.window.open_files([source])
+        self.assertEqual(self.panel.sources, [])
+        self.assertEqual(self.window.sources, [image.resolve()])
+        self.message.assert_called_once()
+        self.window._set_processing_state(False)
+        self.assertTrue(all(button.isEnabled() for button in self.window.mode_buttons))
+
+    def test_open_video_picker_cancel_keeps_queue_and_selected_files_replace_it(self):
+        source = self.video()
+        other = self.video("second.mp4")
+        self.panel.set_sources([source])
+        with patch("pixelkit.video_panel.QFileDialog.getOpenFileNames", return_value=([], "")):
+            self.panel.choose_many()
+        self.assertEqual(self.panel.sources, [source.resolve()])
+        with patch("pixelkit.video_panel.QFileDialog.getOpenFileNames", return_value=([str(other)], "")):
+            self.panel.choose_many()
+        self.assertEqual(self.panel.sources, [other.resolve()])
+
+    def test_existing_single_output_requires_confirmation(self):
+        source = self.video()
+        output = self.video("chosen.mp4")
+        self.panel.set_sources([source])
+        self.panel.output_edit.setText(str(output))
+        self.message.return_value = QMessageBox.StandardButton.No
+        with patch("pixelkit.video_panel.VideoWorker", return_value=self.mock_worker()) as worker:
+            self.panel.start_processing()
+            worker.assert_not_called()
+            self.message.return_value = QMessageBox.StandardButton.Yes
+            self.panel.start_processing()
+            worker.assert_called_once()
+        self.assertEqual(output.read_bytes(), b"video fixture")
+
+    def test_missing_video_engine_disables_processing_and_does_not_start_worker(self):
+        source = self.video()
+        self.panel.ffmpeg = None
+        self.panel.set_sources([source])
+        self.assertFalse(self.panel.process_button.isEnabled())
+        self.assertIn("FFmpeg", self.panel.status.text())
+        with patch("pixelkit.video_panel.VideoWorker") as worker:
+            self.panel.start_processing()
+        worker.assert_not_called()
+        self.assertFalse(self.panel.processing)
+
+    def test_cancelled_encoding_progress_does_not_replace_cancelling_status(self):
+        self.panel.set_sources([self.video()])
+        self.panel.worker = self.mock_worker()
+        self.panel._set_busy(True)
+        self.panel.cancel_processing()
+        status = self.panel.status.text()
+        self.panel._encoding_progress(60, "late progress.mov")
+        self.panel._file_progress(1, 2, "late progress.mov")
+        self.assertEqual(self.panel.status.text(), status)
+
+
+if __name__ == "__main__":
+    unittest.main()
