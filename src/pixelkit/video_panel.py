@@ -1,10 +1,12 @@
 """Video compression controls, queue and report, separate from image settings."""
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtCore import QLocale, Qt, pyqtSignal
+from PyQt6.QtGui import QDoubleValidator
+from PyQt6.QtWidgets import QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
 from pixelkit.report import BatchReport, ReportDialog, human_size
 from pixelkit.video import VIDEO_SUFFIXES, VideoSettings, VideoWorker, find_ffmpeg, find_ffprobe
@@ -87,10 +89,38 @@ class VideoPanel(QWidget):
         settings_grid.setHorizontalSpacing(12)
         settings_grid.setVerticalSpacing(14)
         settings_grid.setColumnStretch(1, 1)
+        self.preset_caption = QLabel('Preset')
         for row, (label, control) in enumerate((('Preset', self.preset_combo), ('Resolution', self.resolution_combo), ('Audio', self.audio_combo))):
-            settings_grid.addWidget(QLabel(label), row, 0)
+            caption = self.preset_caption if row == 0 else QLabel(label)
+            caption.setBuddy(control)
+            settings_grid.addWidget(caption, row, 0)
             settings_grid.addWidget(control, row, 1)
         settings_layout.addLayout(settings_grid)
+        target_row = QHBoxLayout()
+        self.target_size_check = QCheckBox('Limit file size')
+        self.target_size_check.setAccessibleName('Limit the size of each output video')
+        self.target_size_edit = QLineEdit('25')
+        validator = QDoubleValidator(0.001, 1_000_000, 3, self.target_size_edit)
+        validator.setNotation(QDoubleValidator.Notation.StandardNotation)
+        locale = QLocale.c()
+        locale.setNumberOptions(QLocale.NumberOption.RejectGroupSeparator)
+        validator.setLocale(locale)
+        self.target_size_edit.setValidator(validator)
+        self.target_size_edit.setAccessibleName('Maximum size per output video in MB')
+        self.target_size_edit.setToolTip('1 MB = 1,000,000 bytes. You can enter decimals, for example 2.5.')
+        self.target_size_edit.setMaximumWidth(110)
+        self.target_size_edit.setEnabled(False)
+        self.target_size_check.toggled.connect(self._update_target_controls)
+        target_row.addWidget(self.target_size_check)
+        target_row.addStretch()
+        target_row.addWidget(self.target_size_edit)
+        target_row.addWidget(QLabel('MB'))
+        settings_layout.addLayout(target_row)
+        self.target_size_hint = QLabel('The limit applies to each video. Bitrate is adjusted automatically and processing can take longer. Resolution and audio follow your choices.')
+        self.target_size_hint.setObjectName('infoLabel')
+        self.target_size_hint.setWordWrap(True)
+        self.target_size_hint.hide()
+        settings_layout.addWidget(self.target_size_hint)
         note = QLabel('Aspect ratio is preserved. Smaller videos are never enlarged. SDR video without transparency only.')
         note.setObjectName('infoLabel')
         note.setWordWrap(True)
@@ -194,10 +224,18 @@ class VideoPanel(QWidget):
         self._update_state()
 
     def _update_state(self) -> None:
+        self._update_target_controls()
         self.process_button.setEnabled(self.available and bool(self.sources) and bool(self.output_edit.text().strip()) and not self.processing)
         self.clear_button.setEnabled(bool(self.sources) and not self.processing)
         self.report_button.setEnabled(self.last_report is not None and not self.processing)
         self.state_changed.emit()
+
+    def _update_target_controls(self) -> None:
+        limited = self.target_size_check.isChecked()
+        self.target_size_edit.setEnabled(limited and not self.processing)
+        self.target_size_hint.setVisible(limited)
+        self.preset_caption.setText('Starting quality' if limited else 'Preset')
+        self.preset_combo.setToolTip('The chosen preset is tried first. If needed, compression increases to fit the limit.' if limited else 'Choose a balance between quality and file size.')
 
     def choose_many(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, 'Choose videos', '', 'Videos (*.mp4 *.mov *.m4v)')
@@ -227,6 +265,12 @@ class VideoPanel(QWidget):
         text = self.output_edit.text().strip()
         if not text:
             return
+        target_bytes = None
+        if self.target_size_check.isChecked():
+            if not self.target_size_edit.hasAcceptableInput():
+                self.show_message(QMessageBox.Icon.Warning, 'Check file size', 'Enter a size from 0.001 to 1,000,000 MB, using a decimal point for fractions.')
+                return
+            target_bytes = int(Decimal(self.target_size_edit.text()) * 1_000_000)
         output = Path(text).expanduser()
         batch = len(self.sources) > 1
         try:
@@ -254,7 +298,7 @@ class VideoPanel(QWidget):
                     if answer != QMessageBox.StandardButton.Yes:
                         return
                 outputs = [output]
-            settings = VideoSettings(self.preset_combo.currentData(), self.resolution_combo.currentData(), self.audio_combo.currentData())
+            settings = VideoSettings(self.preset_combo.currentData(), self.resolution_combo.currentData(), self.audio_combo.currentData(), target_bytes=target_bytes)
         except (OSError, ValueError) as exc:
             self.show_message(QMessageBox.Icon.Warning, 'Check output location', str(exc))
             return

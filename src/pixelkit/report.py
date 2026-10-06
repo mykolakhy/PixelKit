@@ -42,6 +42,7 @@ class FileResult:
     quality: int | None = None
     media_type: str = "image"
     elapsed_seconds: float | None = None
+    target_bytes: int | None = None
 
     @property
     def succeeded(self) -> bool:
@@ -99,9 +100,10 @@ class ReportDialog(QDialog):
         layout.addWidget(status)
 
         video_report = any(file.media_type == "video" for file in report.files)
-        self.table = QTableWidget(len(report.files), 7 if video_report else 6)
+        limited_report = any(file.media_type == "video" and file.target_bytes is not None for file in report.files)
+        self.table = QTableWidget(len(report.files), 6 + int(video_report) + int(limited_report))
         self.table.setAccessibleName("Processing results for each file")
-        self.table.setHorizontalHeaderLabels(["File", "Format", "Before", "After", "Change", "Result"] + (["Time"] if video_report else []))
+        self.table.setHorizontalHeaderLabels(["File", "Format", "Before", "After", "Change", "Result"] + (["Time"] if video_report else []) + (["Limit"] if limited_report else []))
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -114,6 +116,8 @@ class ReportDialog(QDialog):
             values = [file.source.name, file.output.suffix.lstrip(".").upper(), human_size(file.before) if file.before is not None else "—", human_size(file.after) if file.succeeded else "—", size_change(file.before, file.after) if file.succeeded else "—", file.status]
             if video_report:
                 values.append(f"{file.elapsed_seconds:.1f} s" if file.elapsed_seconds is not None else "—")
+            if limited_report:
+                values.append(f"{file.target_bytes / 1000000:g} MB" if file.target_bytes is not None else "—")
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip(file.error if column == 5 and file.error else str(file.source if column == 0 else file.output))
@@ -149,7 +153,9 @@ class ReportDialog(QDialog):
         if row >= 0:
             file = self.report.files[row]
             quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
-            self.details.setPlainText(file.error or (str(file.output) + quality))
+            limit = f"\nLimit: {file.target_bytes / 1000000:g} MB ({file.target_bytes:,} bytes)" if file.target_bytes is not None else ""
+            actual = f"\nActual size: {file.after / 1000000:g} MB ({file.after:,} bytes)" if file.target_bytes is not None and file.succeeded else ""
+            self.details.setPlainText((file.error or (str(file.output) + quality)) + limit + actual)
             self.details.setToolTip(file.error or str(file.output))
             self.compare_button.setEnabled(file.media_type == "image" and file.succeeded and file.source.is_file() and file.output.is_file())
 
