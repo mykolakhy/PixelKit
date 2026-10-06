@@ -6,10 +6,11 @@ from pathlib import Path
 
 from PyQt6.QtCore import QLocale, Qt, pyqtSignal
 from PyQt6.QtGui import QDoubleValidator
-from PyQt6.QtWidgets import QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
 from pixelkit.report import BatchReport, ReportDialog, human_size
 from pixelkit.video import VIDEO_SUFFIXES, VideoSettings, VideoWorker, find_ffmpeg, find_ffprobe
+from pixelkit.video_presets import VideoPresetStore, video_preset_description, video_preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 
 
@@ -17,14 +18,18 @@ class VideoPanel(QWidget):
     busy_changed = pyqtSignal(bool)
     state_changed = pyqtSignal()
 
-    def __init__(self, colors, drop_list, show_message, parent=None) -> None:
+    def __init__(self, colors, drop_list, show_message, parent=None, preset_store: VideoPresetStore | None = None) -> None:
         super().__init__(parent)
+        self.colors = colors
         self.show_message = show_message
         self.sources = []
         self.worker = None
         self.processing = False
         self.last_report = None
         self.source_list = drop_list
+        self.video_preset_store = preset_store if preset_store is not None else VideoPresetStore()
+        self.custom_presets = self.video_preset_store.load()
+        self.applying_preset = False
         self.ffmpeg, self.ffprobe = find_ffmpeg(), find_ffprobe()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -66,6 +71,24 @@ class VideoPanel(QWidget):
         grid.addWidget(inputs, 0, 0, 2, 1)
 
         settings, settings_layout = self._card('Compression', 'Choose a balance between quality and file size')
+        self.saved_preset_combo = DropdownComboBox(colors)
+        self.saved_preset_combo.setAccessibleName('Saved video preset')
+        self.saved_preset_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.saved_preset_combo.setMinimumContentsLength(16)
+        preset_label = QLabel('Saved preset')
+        preset_label.setBuddy(self.saved_preset_combo)
+        settings_layout.addWidget(preset_label)
+        settings_layout.addWidget(self.saved_preset_combo)
+        preset_actions = QHBoxLayout()
+        self.save_preset_button = QPushButton('Save preset…')
+        self.rename_preset_button = QPushButton('Rename…')
+        self.delete_preset_button = QPushButton('Delete')
+        for button, callback in ((self.save_preset_button, self._save_preset), (self.rename_preset_button, self._rename_preset), (self.delete_preset_button, self._delete_preset)):
+            button.clicked.connect(callback)
+            preset_actions.addWidget(button)
+        self.rename_preset_button.setAccessibleName('Rename video preset')
+        self.delete_preset_button.setAccessibleName('Delete video preset')
+        settings_layout.addLayout(preset_actions)
         self.preset_combo = DropdownComboBox(colors)
         self.preset_combo.setAccessibleName('Video compression preset')
         for name, key, detail in (
@@ -89,8 +112,8 @@ class VideoPanel(QWidget):
         settings_grid.setHorizontalSpacing(12)
         settings_grid.setVerticalSpacing(14)
         settings_grid.setColumnStretch(1, 1)
-        self.preset_caption = QLabel('Preset')
-        for row, (label, control) in enumerate((('Preset', self.preset_combo), ('Resolution', self.resolution_combo), ('Audio', self.audio_combo))):
+        self.preset_caption = QLabel('Quality')
+        for row, (label, control) in enumerate((('Quality', self.preset_combo), ('Resolution', self.resolution_combo), ('Audio', self.audio_combo))):
             caption = self.preset_caption if row == 0 else QLabel(label)
             caption.setBuddy(control)
             settings_grid.addWidget(caption, row, 0)
@@ -175,6 +198,14 @@ class VideoPanel(QWidget):
         footer.addWidget(self.process_button)
         layout.addLayout(footer)
         self.status.setText('Add videos to get started' if self.available else 'Video processing is unavailable. Install FFmpeg and FFprobe, then restart PixelKit.')
+        if self.video_preset_store.load_error:
+            self.status.setText('Saved video presets could not be loaded. You can adjust settings and save new presets.')
+        self._refresh_presets()
+        self.saved_preset_combo.currentIndexChanged.connect(self._apply_selected_preset)
+        for combo in (self.preset_combo, self.resolution_combo, self.audio_combo):
+            combo.currentIndexChanged.connect(self._preset_edited)
+        self.target_size_check.toggled.connect(self._preset_edited)
+        self.target_size_edit.textChanged.connect(self._target_edited)
         self._update_state()
 
     @property
@@ -225,6 +256,7 @@ class VideoPanel(QWidget):
 
     def _update_state(self) -> None:
         self._update_target_controls()
+        self._update_preset_controls()
         self.process_button.setEnabled(self.available and bool(self.sources) and bool(self.output_edit.text().strip()) and not self.processing)
         self.clear_button.setEnabled(bool(self.sources) and not self.processing)
         self.report_button.setEnabled(self.last_report is not None and not self.processing)
@@ -234,8 +266,178 @@ class VideoPanel(QWidget):
         limited = self.target_size_check.isChecked()
         self.target_size_edit.setEnabled(limited and not self.processing)
         self.target_size_hint.setVisible(limited)
-        self.preset_caption.setText('Starting quality' if limited else 'Preset')
+        self.preset_caption.setText('Starting quality' if limited else 'Quality')
         self.preset_combo.setToolTip('The chosen preset is tried first. If needed, compression increases to fit the limit.' if limited else 'Choose a balance between quality and file size.')
+
+    def _refresh_presets(self, selected: str | None = None) -> None:
+        self.saved_preset_combo.blockSignals(True)
+        try:
+            self.saved_preset_combo.clear()
+            self.saved_preset_combo.addItem('Custom settings', None)
+            self.saved_preset_combo.setItemData(0, 'Adjust video settings manually', DETAIL_ROLE)
+            if self.custom_presets:
+                self.saved_preset_combo.insertSeparator(1)
+            for name, preset in self.custom_presets.items():
+                self.saved_preset_combo.addItem(name, name)
+                row = self.saved_preset_combo.count() - 1
+                detail = video_preset_description(preset)
+                self.saved_preset_combo.setItemData(row, detail, DETAIL_ROLE)
+                self.saved_preset_combo.setItemData(row, f'{name}\n{detail}', Qt.ItemDataRole.ToolTipRole)
+            self.saved_preset_combo.setCurrentIndex(max(0, self.saved_preset_combo.findData(selected)))
+        finally:
+            self.saved_preset_combo.blockSignals(False)
+        self._update_preset_controls()
+
+    def _update_preset_controls(self) -> None:
+        selected = self.saved_preset_combo.currentData() in self.custom_presets
+        self.saved_preset_combo.setEnabled(not self.processing)
+        self.save_preset_button.setEnabled(not self.processing)
+        self.rename_preset_button.setEnabled(selected and not self.processing)
+        self.delete_preset_button.setEnabled(selected and not self.processing)
+        self.saved_preset_combo.setToolTip('Apply saved settings to every input video. Editing a setting switches to Custom settings.')
+
+    def _preset_edited(self, *_args) -> None:
+        if not self.applying_preset:
+            self.saved_preset_combo.setCurrentIndex(0)
+            self._update_preset_controls()
+
+    def _target_edited(self, *_args) -> None:
+        if self.target_size_check.isChecked():
+            self._preset_edited()
+
+    def _apply_selected_preset(self, _index: int) -> None:
+        if self.processing:
+            return
+        preset = self.custom_presets.get(self.saved_preset_combo.currentData())
+        if preset is not None:
+            self.applying_preset = True
+            try:
+                self.preset_combo.setCurrentIndex(self.preset_combo.findData(preset.preset))
+                self.resolution_combo.setCurrentIndex(self.resolution_combo.findData(preset.max_height))
+                self.audio_combo.setCurrentIndex(self.audio_combo.findData(preset.audio))
+                self.target_size_check.setChecked(preset.target_bytes is not None)
+                megabytes = Decimal(preset.target_bytes) / 1_000_000 if preset.target_bytes is not None else Decimal(25)
+                self.target_size_edit.setText(format(megabytes, 'f'))
+                self._update_target_controls()
+            finally:
+                self.applying_preset = False
+        self._update_preset_controls()
+
+    def _current_settings(self) -> VideoSettings:
+        target_bytes = None
+        if self.target_size_check.isChecked():
+            if not self.target_size_edit.hasAcceptableInput():
+                raise ValueError('Enter a size from 0.001 to 1,000,000 MB, using a decimal point for fractions.')
+            target_bytes = int(Decimal(self.target_size_edit.text()) * 1_000_000)
+        return VideoSettings(self.preset_combo.currentData(), self.resolution_combo.currentData(), self.audio_combo.currentData(), target_bytes=target_bytes)
+
+    def _ask_preset_name(self, suggested: str, title: str = 'Save video preset') -> str | None:
+        dialog = QDialog(self)
+        dialog.setObjectName('videoPresetDialog')
+        dialog.setWindowTitle(title)
+        dialog.setFixedWidth(420)
+        dialog.setStyleSheet(f"QDialog#videoPresetDialog {{ background: {self.colors['card']}; }}")
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+        layout.addWidget(QLabel('Preset name'))
+        edit = QLineEdit(suggested)
+        edit.setMaxLength(60)
+        edit.setPlaceholderText('e.g. For sharing · 25 MB')
+        edit.setAccessibleName('Video preset name')
+        layout.addWidget(edit)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton('Cancel')
+        cancel.clicked.connect(dialog.reject)
+        save = QPushButton('Rename' if title == 'Rename video preset' else 'Save')
+        save.setObjectName('primaryButton')
+        save.setDefault(True)
+        save.setEnabled(bool(suggested.strip()))
+        edit.textChanged.connect(lambda text: save.setEnabled(bool(text.strip())))
+        save.clicked.connect(dialog.accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(save)
+        layout.addLayout(buttons)
+        edit.setFocus()
+        edit.selectAll()
+        try:
+            return edit.text().strip() if dialog.exec() == QDialog.DialogCode.Accepted else None
+        finally:
+            dialog.deleteLater()
+
+    def _validated_preset_name(self, suggested: str, title: str) -> str | None:
+        while True:
+            answer = self._ask_preset_name(suggested, title)
+            if answer is None:
+                return None
+            try:
+                return video_preset_name(answer)
+            except ValueError as exc:
+                self.show_message(QMessageBox.Icon.Warning, 'Choose a preset name', str(exc))
+                suggested = answer
+
+    def _confirm(self, title: str, text: str) -> bool:
+        return self.show_message(QMessageBox.Icon.Question, title, text, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
+
+    def _persist_presets(self, presets: dict[str, VideoSettings]) -> bool:
+        try:
+            self.video_preset_store.save(presets)
+        except (OSError, ValueError) as exc:
+            self.show_message(QMessageBox.Icon.Warning, 'Could not save video presets', str(exc))
+            return False
+        self.custom_presets = presets
+        return True
+
+    def _save_preset(self) -> None:
+        if self.processing:
+            return
+        try:
+            preset = self._current_settings()
+        except ValueError as exc:
+            self.show_message(QMessageBox.Icon.Warning, 'Check preset settings', str(exc))
+            return
+        name = self._validated_preset_name(self.saved_preset_combo.currentData() or '', 'Save video preset')
+        if name is None:
+            return
+        existing = next((old for old in self.custom_presets if old.casefold() == name.casefold()), None)
+        if existing and not self._confirm('Replace video preset?', f'Replace the saved settings for “{existing}”?'):
+            return
+        updated = dict(self.custom_presets)
+        if existing:
+            del updated[existing]
+        updated[name] = preset
+        if self._persist_presets(updated):
+            self._refresh_presets(name)
+            self.status.setText(f'Video preset saved: {name}')
+
+    def _rename_preset(self) -> None:
+        old = self.saved_preset_combo.currentData()
+        if self.processing or old not in self.custom_presets:
+            return
+        name = self._validated_preset_name(old, 'Rename video preset')
+        if name is None or name == old:
+            return
+        existing = next((key for key in self.custom_presets if key != old and key.casefold() == name.casefold()), None)
+        if existing and not self._confirm('Replace video preset?', f'Replace “{existing}” with the saved settings from “{old}”?'):
+            return
+        updated = {key: value for key, value in self.custom_presets.items() if key not in (old, existing)}
+        updated[name] = self.custom_presets[old]
+        if self._persist_presets(updated):
+            self._refresh_presets(name)
+            self.status.setText(f'Video preset renamed: {name}')
+
+    def _delete_preset(self) -> None:
+        name = self.saved_preset_combo.currentData()
+        if self.processing or name not in self.custom_presets:
+            return
+        if not self._confirm('Delete video preset?', f'Delete “{name}”? Your current video settings will be kept.'):
+            return
+        updated = dict(self.custom_presets)
+        del updated[name]
+        if self._persist_presets(updated):
+            self._refresh_presets()
+            self.status.setText(f'Video preset deleted: {name}')
 
     def choose_many(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, 'Choose videos', '', 'Videos (*.mp4 *.mov *.m4v)')
@@ -265,12 +467,11 @@ class VideoPanel(QWidget):
         text = self.output_edit.text().strip()
         if not text:
             return
-        target_bytes = None
-        if self.target_size_check.isChecked():
-            if not self.target_size_edit.hasAcceptableInput():
-                self.show_message(QMessageBox.Icon.Warning, 'Check file size', 'Enter a size from 0.001 to 1,000,000 MB, using a decimal point for fractions.')
-                return
-            target_bytes = int(Decimal(self.target_size_edit.text()) * 1_000_000)
+        try:
+            settings = self._current_settings()
+        except ValueError as exc:
+            self.show_message(QMessageBox.Icon.Warning, 'Check file size', str(exc))
+            return
         output = Path(text).expanduser()
         batch = len(self.sources) > 1
         try:
@@ -298,7 +499,6 @@ class VideoPanel(QWidget):
                     if answer != QMessageBox.StandardButton.Yes:
                         return
                 outputs = [output]
-            settings = VideoSettings(self.preset_combo.currentData(), self.resolution_combo.currentData(), self.audio_combo.currentData(), target_bytes=target_bytes)
         except (OSError, ValueError) as exc:
             self.show_message(QMessageBox.Icon.Warning, 'Check output location', str(exc))
             return

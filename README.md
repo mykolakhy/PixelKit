@@ -38,7 +38,9 @@ Choose an output file for one video or an output folder for a batch. Batch outpu
 
 Enable **Limit file size** and enter a limit in decimal MB (1 MB = 1,000,000 bytes) to cap each video's output. PixelKit keeps the selected preset's result when it already fits; otherwise it measures the selected audio and uses two-pass H.264 encoding with automatic bitrate selection. It checks the actual MP4 size and retries at a lower bitrate when needed. This can take longer than ordinary compression. Resolution and audio choices are retained; if the limit cannot be reached, the report suggests a larger limit, a lower resolution, or compressed/removed audio. Oversized results are never published, and originals and existing destinations survive failure or cancellation. The report includes the requested limit and exact actual size.
 
-This version supports SDR videos. HDR, wide-gamut and transparent video sources receive a clear unsupported-video error. Output retains the main video and all selected audio tracks; subtitles, extra video tracks, chapters and metadata are omitted. Video playback/comparison, hardware acceleration and custom saved video presets are not included yet. All processing remains local.
+Use **Save preset…** in the video Compression card to keep your quality, resolution, audio choice and optional file-size limit. Choose a saved preset to apply it to the entire video queue. **Rename…** changes its name; **Delete** removes it after confirmation. Replacing an existing name also requires confirmation. Video presets survive app restarts and are stored separately from image presets in your local preferences. Editing a video setting switches to **Custom settings**. Presets keep the current input files and destination, do not start processing, and cannot be changed while processing is active.
+
+This version supports SDR videos. HDR, wide-gamut and transparent video sources receive a clear unsupported-video error. Output retains the main video and all selected audio tracks; subtitles, extra video tracks, chapters and metadata are omitted. Video playback/comparison and hardware acceleration are not included yet. All processing remains local.
 
 ## Presets
 
@@ -91,6 +93,7 @@ src/pixelkit/       Application package and bundled icons
   comparison.py    On-demand original/result comparison
   video.py         Video probing, compression and cancellable worker
   video_panel.py   Video settings, queue and result report
+  video_presets.py Validated custom video presets and local preferences
   assets/          Logo, Windows icon, and SVG controls
 packaging/         Platform-specific build configuration and installer
 scripts/           macOS builder and bundle verification

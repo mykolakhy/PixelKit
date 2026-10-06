@@ -96,7 +96,7 @@ class VideoUiTests(unittest.TestCase):
         self.panel.target_size_check.setChecked(False)
         self.assertFalse(self.panel.target_size_edit.isEnabled())
         self.assertTrue(self.panel.target_size_hint.isHidden())
-        self.assertEqual(self.panel.preset_caption.text(), "Preset")
+        self.assertEqual(self.panel.preset_caption.text(), "Quality")
         self.panel._set_busy(True)
         self.panel._set_busy(False)
         self.assertFalse(self.panel.target_size_edit.isEnabled())
