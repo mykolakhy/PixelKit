@@ -79,8 +79,71 @@ class VideoUiTests(unittest.TestCase):
         self.assertEqual(jobs, [(file.resolve(), output / (file.stem + "_optimized.mp4")) for file in files])
         self.assertEqual(output_dir, output)
         self.assertEqual((settings.preset, settings.max_height, settings.audio), ("small", 720, "remove"))
+        self.assertIsNone(settings.target_bytes)
         worker.start.assert_called_once()
         self.assertTrue(self.panel.processing)
+
+    def test_video_size_limit_defaults_off_and_toggling_preserves_entered_size(self):
+        self.assertFalse(self.panel.target_size_check.isChecked())
+        self.assertEqual(self.panel.target_size_edit.text(), "25")
+        self.assertFalse(self.panel.target_size_edit.isEnabled())
+        self.assertTrue(self.panel.target_size_hint.isHidden())
+        self.panel.target_size_check.setChecked(True)
+        self.assertTrue(self.panel.target_size_edit.isEnabled())
+        self.assertFalse(self.panel.target_size_hint.isHidden())
+        self.assertEqual(self.panel.preset_caption.text(), "Starting quality")
+        self.panel.target_size_edit.setText("2.5")
+        self.panel.target_size_check.setChecked(False)
+        self.assertFalse(self.panel.target_size_edit.isEnabled())
+        self.assertTrue(self.panel.target_size_hint.isHidden())
+        self.assertEqual(self.panel.preset_caption.text(), "Preset")
+        self.panel._set_busy(True)
+        self.panel._set_busy(False)
+        self.assertFalse(self.panel.target_size_edit.isEnabled())
+        self.panel.target_size_check.setChecked(True)
+        self.assertEqual(self.panel.target_size_edit.text(), "2.5")
+
+    def test_video_batch_passes_exact_decimal_mb_limit_and_retains_resolution_and_audio(self):
+        files = [self.video("first.mov"), self.video("second.mp4")]
+        self.panel.set_sources(files)
+        self.panel.target_size_check.setChecked(True)
+        self.panel.target_size_edit.setText("1.001")
+        self.panel.resolution_combo.setCurrentIndex(self.panel.resolution_combo.findData(1080))
+        self.panel.audio_combo.setCurrentIndex(self.panel.audio_combo.findData("keep"))
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker) as construct:
+            self.panel.start_processing()
+        jobs, _, settings = construct.call_args.args[:3]
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual(settings.target_bytes, 1_001_000)
+        self.assertEqual((settings.max_height, settings.audio), (1080, "keep"))
+        worker.start.assert_called_once()
+
+    def test_invalid_video_size_limit_does_not_start_processing_or_create_output_folder(self):
+        self.panel.set_sources([self.video("first.mov"), self.video("second.mp4")])
+        folder = self.root / "new output folder"
+        self.panel.output_edit.setText(str(folder))
+        self.panel.target_size_check.setChecked(True)
+        for value in ("", "0", "-1", "1,5", "0.0001", "1000001", "nan"):
+            with self.subTest(value=value), patch("pixelkit.video_panel.VideoWorker") as worker:
+                self.panel.target_size_edit.setText(value)
+                self.panel.start_processing()
+                worker.assert_not_called()
+                self.assertFalse(self.panel.processing)
+                self.assertFalse(folder.exists())
+                self.assertEqual(self.message.call_args.args[1], "Check file size")
+
+    def test_disabling_video_size_limit_ignores_an_unfinished_entry(self):
+        self.panel.set_sources([self.video()])
+        self.panel.target_size_check.setChecked(True)
+        self.panel.target_size_edit.clear()
+        self.panel.target_size_check.setChecked(False)
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker) as construct:
+            self.panel.start_processing()
+        self.assertIsNone(construct.call_args.args[2].target_bytes)
+        worker.start.assert_called_once()
+        self.message.assert_not_called()
 
     def test_video_cannot_overwrite_its_original(self):
         source = self.video("original.mp4")
@@ -151,11 +214,13 @@ class VideoUiTests(unittest.TestCase):
     def test_video_cancel_locks_controls_until_finished_and_restores_report(self):
         source = self.video()
         self.panel.set_sources([source])
+        self.panel.target_size_check.setChecked(True)
+        self.panel.target_size_edit.setText("2.5")
         worker = self.mock_worker()
         with patch("pixelkit.video_panel.VideoWorker", return_value=worker):
             self.panel.start_processing()
         self.assertTrue(all(not button.isEnabled() for button in self.window.mode_buttons))
-        for widget in (self.panel.source_list, self.panel.preset_combo, self.panel.resolution_combo, self.panel.audio_combo, self.panel.output_edit):
+        for widget in (self.panel.source_list, self.panel.preset_combo, self.panel.resolution_combo, self.panel.audio_combo, self.panel.target_size_check, self.panel.target_size_edit, self.panel.output_edit):
             self.assertFalse(widget.isEnabled())
         self.panel.cancel_button.click()
         worker.cancel.assert_called_once()
@@ -170,6 +235,10 @@ class VideoUiTests(unittest.TestCase):
         self.assertTrue(self.panel.cancel_button.isHidden())
         self.assertTrue(self.panel.process_button.isEnabled())
         self.assertTrue(self.panel.report_button.isEnabled())
+        self.assertTrue(self.panel.target_size_check.isEnabled())
+        self.assertTrue(self.panel.target_size_check.isChecked())
+        self.assertTrue(self.panel.target_size_edit.isEnabled())
+        self.assertEqual(self.panel.target_size_edit.text(), "2.5")
         self.assertIs(self.panel.last_report, report)
         self.assertTrue(all(button.isEnabled() for button in self.window.mode_buttons))
         self.assertIn("Cancelled", self.panel.status.text())

@@ -122,6 +122,24 @@ class ReportTests(unittest.TestCase):
         self.addCleanup(dialog.close)
         self.assertFalse(dialog.open_folder.isEnabled())
 
+    def test_video_report_shows_decimal_limit_and_exact_actual_bytes(self):
+        good = FileResult(self.root / "one.mov", self.root / "one.mp4", 2_000_000, 995_123, media_type="video", elapsed_seconds=2.0, target_bytes=1_000_000)
+        failed = FileResult(self.root / "two.mov", self.root / "two.mp4", 2_000_000, None, "Cannot fit this video", media_type="video", target_bytes=1_000_000)
+        unlimited = FileResult(self.root / "three.mov", self.root / "three.mp4", 2_000_000, 900_000, media_type="video")
+        dialog = ReportDialog(BatchReport((good, failed, unlimited), self.root))
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.columnCount(), 8)
+        self.assertEqual(dialog.table.horizontalHeaderItem(7).text(), "Limit")
+        self.assertEqual(dialog.table.item(0, 7).text(), "1 MB")
+        self.assertEqual(dialog.table.item(2, 7).text(), "—")
+        dialog.table.selectRow(0)
+        self.assertIn("Limit: 1 MB (1,000,000 bytes)", dialog.details.toPlainText())
+        self.assertIn("Actual size: 0.995123 MB (995,123 bytes)", dialog.details.toPlainText())
+        dialog.table.selectRow(1)
+        self.assertIn("Cannot fit", dialog.details.toPlainText())
+        self.assertIn("1,000,000 bytes", dialog.details.toPlainText())
+        self.assertNotIn("Actual size", dialog.details.toPlainText())
+
 
 if __name__ == "__main__":
     unittest.main()

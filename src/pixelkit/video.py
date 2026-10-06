@@ -30,6 +30,7 @@ VIDEO_PRESETS = {
     "small": (28, "medium", 96),
 }
 MP4_AUDIO_CODECS = frozenset({"aac", "mp3", "ac3", "eac3", "alac"})
+MAX_TARGET_ATTEMPTS = 5
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,7 @@ class VideoSettings:
     preset: str = "balanced"
     max_height: int = 0
     audio: str = "compress"
+    target_bytes: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.preset, str) or self.preset not in VIDEO_PRESETS:
@@ -45,6 +47,8 @@ class VideoSettings:
             raise ValueError("Choose Original, 1080p, or 720p for the video resolution.")
         if not isinstance(self.audio, str) or self.audio not in {"keep", "compress", "remove"}:
             raise ValueError("Choose Keep, Compress, or Remove for audio.")
+        if self.target_bytes is not None and (type(self.target_bytes) is not int or self.target_bytes < 1):
+            raise ValueError("Enter a positive video file size limit.")
 
 
 @dataclass(frozen=True)
@@ -147,13 +151,22 @@ def probe_video(source: Path, ffprobe: str, cancelled: Callable[[], bool] = lamb
     return VideoInfo(duration, stream_index, width, height, codecs)
 
 
-def video_command(ffmpeg: str, source: Path, output: Path, settings: VideoSettings, info: VideoInfo) -> list[str]:
+def video_command(ffmpeg: str, source: Path, output: Path, settings: VideoSettings, info: VideoInfo, *, video_bitrate: int | None = None, pass_number: int | None = None, pass_log: Path | None = None) -> list[str]:
     crf, speed, bitrate = VIDEO_PRESETS[settings.preset]
     factor = f"min(1,{settings.max_height}/ih)" if settings.max_height else "1"
     # FFmpeg applies display rotation before this filter. Square pixels preserve
     # the displayed aspect ratio, including anamorphic source material.
     scale = f"scale=w='max(2,trunc(iw*sar*{factor}/2)*2)':h='max(2,trunc(ih*{factor}/2)*2)':flags=lanczos,setsar=1"
-    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(source.absolute()), "-map", f"0:{info.stream_index}", "-vf", scale, "-c:v", "libx264", "-preset", speed, "-crf", str(crf), "-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"]
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(source.absolute()), "-map", f"0:{info.stream_index}", "-vf", scale, "-c:v", "libx264", "-preset", speed]
+    command.extend(("-crf", str(crf)) if video_bitrate is None else ("-b:v", str(video_bitrate)))
+    command.extend(("-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"))
+    if pass_number is not None:
+        if pass_number not in {1, 2} or video_bitrate is None or pass_log is None:
+            raise ValueError("Two-pass encoding requires a bitrate and private pass log.")
+        command.extend(("-pass:v", str(pass_number), "-passlogfile", str(pass_log.absolute())))
+        if pass_number == 1:
+            command.extend(("-an", "-f", "null", os.devnull))
+            return command
     if settings.audio == "remove":
         command.append("-an")
     elif info.audio_codecs:
@@ -226,6 +239,70 @@ def encode_video(command: list[str], duration: float, cancelled: Callable[[], bo
                 reader.join(timeout=2)
 
 
+def _encoded_size(output: Path) -> int:
+    if not output.is_file() or output.stat().st_size == 0:
+        raise ValueError("FFmpeg did not produce a complete video. No output was saved.")
+    return output.stat().st_size
+
+
+def _limit_error(target: int) -> ValueError:
+    return ValueError(f"Cannot fit this video within {target / 1000000:g} MB with the selected resolution and audio. Try a larger limit, a lower resolution, or Compress/Remove audio. No output was saved.")
+
+
+def encode_to_target(ffmpeg: str, source: Path, output: Path, settings: VideoSettings, info: VideoInfo, cancelled: Callable[[], bool], progress: Callable[[int], None]) -> None:
+    """Keep the chosen quality when it fits; otherwise budget audio and video.
+
+    All trials and pass logs live beside output in the worker's private directory.
+    A bitrate is only an estimate: publication always checks the actual MP4 size.
+    """
+    target = settings.target_bytes
+    if target is None:
+        encode_video(video_command(ffmpeg, source, output, settings, info), info.duration, cancelled, progress)
+        return
+    encode_video(video_command(ffmpeg, source, output, settings, info), info.duration, cancelled, lambda value: progress(value // 4))
+    if cancelled():
+        raise ProcessingCancelled()
+    if _encoded_size(output) <= target:
+        return
+
+    audio_size = 0
+    if settings.audio != "remove" and info.audio_codecs:
+        # Measure the audio we will actually retain, including every track and
+        # variable-bitrate/copied streams without reliable bitrate metadata.
+        audio_dir = Path(tempfile.mkdtemp(prefix="audio-", dir=output.parent))
+        audio_output = audio_dir / "budget.mp4"
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(output.absolute()), "-map", "0:a", "-vn", "-c:a", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-f", "mp4", str(audio_output.absolute())]
+        encode_video(command, info.duration, cancelled, lambda value: None)
+        audio_size = _encoded_size(audio_output)
+    if audio_size >= target:
+        raise _limit_error(target)
+    # The reserve is only an estimate. Audio already includes its MP4 index,
+    # so even a near-exhausted estimated budget may fit at the minimum bitrate.
+    reserve = min(max(4096, math.ceil(target * 0.03)), max(1, target // 4))
+    bitrate = max(1000, math.floor((target - audio_size - reserve) * 8 / info.duration))
+    for attempt in range(MAX_TARGET_ATTEMPTS):
+        if cancelled():
+            raise ProcessingCancelled()
+        pass_log = output.parent / f"pass-{attempt}"
+        for pass_number in (1, 2):
+            stage = attempt * 2 + pass_number - 1
+            command = video_command(ffmpeg, source, output, settings, info, video_bitrate=bitrate, pass_number=pass_number, pass_log=pass_log)
+            encode_video(command, info.duration, cancelled, lambda value, stage=stage: progress(25 + (stage * 100 + value) * 74 // (MAX_TARGET_ATTEMPTS * 200)))
+            if cancelled():
+                raise ProcessingCancelled()
+        size = _encoded_size(output)
+        if size <= target:
+            return
+        if bitrate == 1000:
+            break
+        # Reduce proportionally to observed bytes, keeping the measured audio
+        # fixed. Subtracting the reserve again can drive short clips below the
+        # encoder's feasible bitrate even when a fitting result is possible.
+        ratio = (target - audio_size) / max(1, size - audio_size)
+        bitrate = max(1000, math.floor(bitrate * ratio * 0.95))
+    raise _limit_error(target)
+
+
 class VideoWorker(QThread):
     progress = pyqtSignal(int, int, str)
     encoding_progress = pyqtSignal(int, str)
@@ -252,7 +329,7 @@ class VideoWorker(QThread):
         destination_counts = Counter(str(output.resolve()).casefold() for _, output in self.jobs)
         for index, (source, output) in enumerate(self.jobs, start=1):
             if self.cancel_event.is_set():
-                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video"))
+                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video", target_bytes=self.settings.target_bytes))
                 continue
             started = time.monotonic()
             before = after = None
@@ -282,12 +359,12 @@ class VideoWorker(QThread):
                 info = probe_video(source, ffprobe, self.cancel_event.is_set)
                 temporary_dir = Path(tempfile.mkdtemp(prefix=".pixelkit-video-", dir=output.parent))
                 temporary = temporary_dir / output.name
-                encode_video(video_command(ffmpeg, source, temporary, self.settings, info), info.duration, self.cancel_event.is_set, lambda percent: self.encoding_progress.emit(percent, source.name))
+                encode_to_target(ffmpeg, source, temporary, self.settings, info, self.cancel_event.is_set, lambda percent: self.encoding_progress.emit(percent, source.name))
                 if self.cancel_event.is_set():
                     raise ProcessingCancelled()
-                if not temporary.is_file() or temporary.stat().st_size == 0:
-                    raise ValueError("FFmpeg did not produce a complete video. No output was saved.")
-                encoded_size = temporary.stat().st_size
+                encoded_size = _encoded_size(temporary)
+                if self.settings.target_bytes is not None and encoded_size > self.settings.target_bytes:
+                    raise _limit_error(self.settings.target_bytes)
                 if encoded_size >= before:
                     raise ValueError("No size reduction with these settings. The original may already be optimized; try Smallest size or a lower resolution. No output was saved.")
                 temporary.replace(output)
@@ -304,6 +381,6 @@ class VideoWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Compression completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started))
+            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes))
             self.progress.emit(index, len(self.jobs), source.name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))

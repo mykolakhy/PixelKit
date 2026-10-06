@@ -36,7 +36,9 @@ Switch to **Video**, add MP4, MOV or M4V files (or drop a folder), then choose *
 
 Choose an output file for one video or an output folder for a batch. Batch outputs receive unique filenames. Processing displays progress, supports cancellation, and preserves completed videos. The report includes sizes, savings, errors and elapsed time; **View last report** reopens it. Originals remain intact and partial files are removed. Results that would be larger than or equal to the input are reported without replacing the destination.
 
-This first version supports SDR videos. HDR, wide-gamut and transparent video sources receive a clear unsupported-video error. Output retains the main video and all selected audio tracks; subtitles, extra video tracks, chapters and metadata are omitted. Video playback/comparison, hardware acceleration, custom saved video presets and target video sizes are not included yet. All processing remains local.
+Enable **Limit file size** and enter a limit in decimal MB (1 MB = 1,000,000 bytes) to cap each video's output. PixelKit keeps the selected preset's result when it already fits; otherwise it measures the selected audio and uses two-pass H.264 encoding with automatic bitrate selection. It checks the actual MP4 size and retries at a lower bitrate when needed. This can take longer than ordinary compression. Resolution and audio choices are retained; if the limit cannot be reached, the report suggests a larger limit, a lower resolution, or compressed/removed audio. Oversized results are never published, and originals and existing destinations survive failure or cancellation. The report includes the requested limit and exact actual size.
+
+This version supports SDR videos. HDR, wide-gamut and transparent video sources receive a clear unsupported-video error. Output retains the main video and all selected audio tracks; subtitles, extra video tracks, chapters and metadata are omitted. Video playback/comparison, hardware acceleration and custom saved video presets are not included yet. All processing remains local.
 
 ## Presets
 
