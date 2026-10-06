@@ -154,6 +154,66 @@ class TargetVideoTests(TargetVideoTestBase):
         self.assertEqual(progress, sorted(progress))
         self.assertLess(max(progress), 100)
 
+    def test_audio_below_cap_gets_a_minimum_bitrate_trial_when_reserve_exhausts_budget(self):
+        calls = []
+        original = self.source.read_bytes()
+
+        def encode(command, duration, cancelled, update):
+            calls.append(command)
+            pass_number = command_value(command, "-pass", "-pass:v")
+            if command_value(command, "-c:v") is None:
+                Path(command[-1]).write_bytes(b"a" * 9500)
+            elif pass_number != "1":
+                Path(command[-1]).write_bytes(b"v" * (12000 if pass_number is None else 9900))
+            update(99)
+
+        report, progress = self.run_worker([(self.source, self.output)], VideoSettings(audio="keep", target_bytes=10000), VideoInfo(10, 0, 320, 180, ("aac",)), encode)
+        self.assertTrue(report.files[0].succeeded, report.files[0].error)
+        passes = [command for command in calls if command_value(command, "-pass", "-pass:v")]
+        self.assertEqual([command_value(command, "-pass", "-pass:v") for command in passes], ["1", "2"])
+        self.assertEqual([command_value(command, "-b:v") for command in passes], ["1000", "1000"])
+        self.assertEqual(command_value(passes[1], "-c:a:0"), "copy")
+        self.assertEqual(self.output.stat().st_size, 9900)
+        self.assertEqual(self.source.read_bytes(), original)
+        self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
+        self.assertEqual([value for value, name in progress], sorted(value for value, name in progress))
+        self.assertEqual(progress[-1][0], 100)
+
+    def test_correction_below_minimum_tries_minimum_once_then_checks_actual_cap(self):
+        for final_size in (1999, 2001):
+            with self.subTest(final_size=final_size):
+                calls = []
+                self.output.write_bytes(b"existing destination")
+                original = self.source.read_bytes()
+
+                def encode(command, duration, cancelled, update):
+                    calls.append(command)
+                    pass_number = command_value(command, "-pass", "-pass:v")
+                    if pass_number is None:
+                        Path(command[-1]).write_bytes(b"v" * 3000)
+                    elif pass_number == "2":
+                        size = final_size if command_value(command, "-b:v") == "1000" else 2500
+                        Path(command[-1]).write_bytes(b"v" * size)
+                    update(99)
+
+                report, progress = self.run_worker([(self.source, self.output)], VideoSettings(audio="remove", target_bytes=2000), encoder=encode)
+                passes = [command for command in calls if command_value(command, "-pass", "-pass:v")]
+                self.assertEqual([command_value(command, "-pass", "-pass:v") for command in passes], ["1", "2", "1", "2"])
+                self.assertEqual([command_value(command, "-b:v") for command in passes], ["1200", "1200", "1000", "1000"])
+                if final_size <= 2000:
+                    self.assertTrue(report.files[0].succeeded, report.files[0].error)
+                    self.assertEqual(self.output.stat().st_size, final_size)
+                    self.assertEqual(progress[-1][0], 100)
+                else:
+                    self.assertFalse(report.files[0].succeeded)
+                    self.assertIn("Cannot fit", report.files[0].error)
+                    self.assertIsNone(report.files[0].after)
+                    self.assertEqual(self.output.read_bytes(), b"existing destination")
+                    self.assertNotIn(100, [value for value, name in progress])
+                self.assertEqual(self.source.read_bytes(), original)
+                self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
+                self.assertEqual([value for value, name in progress], sorted(value for value, name in progress))
+
     def test_impossible_audio_budget_or_limit_preserves_original_and_existing_output(self):
         for audio, cap in (("keep", 10000), ("remove", 100)):
             with self.subTest(audio=audio, cap=cap):
@@ -163,7 +223,8 @@ class TargetVideoTests(TargetVideoTestBase):
 
                 def encode(command, duration, cancelled, update):
                     calls.append(command)
-                    Path(command[-1]).write_bytes(b"v" * (12000 if command_value(command, "-c:v") else 10000))
+                    if command_value(command, "-pass", "-pass:v") != "1":
+                        Path(command[-1]).write_bytes(b"v" * (12000 if command_value(command, "-c:v") else 10000))
 
                 report, progress = self.run_worker([(self.source, self.output)], VideoSettings(audio=audio, target_bytes=cap), VideoInfo(10, 0, 320, 180, ("aac",)), encode)
                 self.assertFalse(report.files[0].succeeded)
@@ -173,7 +234,9 @@ class TargetVideoTests(TargetVideoTestBase):
                 self.assertIsNone(report.files[0].after)
                 self.assertEqual(self.source.read_bytes(), original)
                 self.assertEqual(self.output.read_bytes(), b"existing destination")
-                self.assertTrue(all(command_value(command, "-pass", "-pass:v") is None for command in calls))
+                passes = [command for command in calls if command_value(command, "-pass", "-pass:v")]
+                self.assertEqual([command_value(command, "-pass", "-pass:v") for command in passes], [] if audio == "keep" else ["1", "2"])
+                self.assertTrue(all(command_value(command, "-b:v") == "1000" for command in passes))
                 self.assertNotIn(100, [value for value, name in progress])
                 self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
 
@@ -363,6 +426,44 @@ class RealTargetVideoTests(TargetVideoTestBase):
 
     def test_real_video_keeps_compatible_audio_bit_for_bit_within_cap(self):
         self.check_real_limit("keep", 45000)
+
+    def test_real_audio_near_cap_still_fits_with_minimum_bitrate_and_keeps_all_frames(self):
+        ffmpeg, ffprobe = find_ffmpeg(), find_ffprobe()
+        command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=64x64:rate=5:duration=60", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=60", "-c:v", "qtrle", "-pix_fmt", "rgb24", "-c:a", "aac", "-b:a", "128k", str(self.source)]
+        subprocess.run(command, check=True, capture_output=True, timeout=30)
+        source_hash = hashlib.sha256(self.source.read_bytes()).digest()
+        info = probe_video(self.source, ffprobe)
+        settings = VideoSettings(audio="keep")
+        baseline = self.root / "audio-heavy preset.mp4"
+        subprocess.run(video_command(ffmpeg, self.source, baseline, settings, info), check=True, capture_output=True, timeout=30)
+        witness = self.root / "minimum bitrate witness.mp4"
+        for pass_number in (1, 2):
+            subprocess.run(video_command(ffmpeg, self.source, witness, settings, info, video_bitrate=1000, pass_number=pass_number, pass_log=self.root / "witness-pass"), check=True, capture_output=True, timeout=30)
+        # Round the feasible witness up to the UI's 0.001 MB precision and add
+        # one further step, so differing encoder builds have a little margin.
+        cap = ((witness.stat().st_size + 999) // 1000 + 1) * 1000
+        audio = self.root / "retained audio budget.mp4"
+        subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-y", "-i", str(baseline), "-map", "0:a", "-vn", "-c:a", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-f", "mp4", str(audio)], check=True, capture_output=True, timeout=30)
+        self.assertLess(audio.stat().st_size, cap)
+        self.assertGreater(audio.stat().st_size, cap * 0.97, "Retained audio must exhaust the conservative reserve")
+        self.assertGreater(baseline.stat().st_size, cap, "The selected preset must exceed the cap")
+        self.output.write_bytes(b"existing destination")
+        report = self.real_worker(VideoSettings(audio="keep", target_bytes=cap))
+        file = report.files[0]
+        self.assertTrue(file.succeeded, file.error)
+        self.assertEqual(file.after, self.output.stat().st_size)
+        self.assertLessEqual(file.after, cap)
+        self.assertLess(file.after, file.before)
+        result_info = probe_video(self.output, ffprobe)
+        self.assertEqual((result_info.width, result_info.height), (64, 64))
+        self.assertEqual(result_info.audio_codecs, ("aac",))
+        self.assertAlmostEqual(result_info.duration, 60, places=3)
+        frames = subprocess.run([ffprobe, "-v", "error", "-count_frames", "-select_streams", "v:0", "-show_entries", "stream=nb_read_frames", "-of", "default=noprint_wrappers=1:nokey=1", str(self.output)], check=True, capture_output=True, text=True, timeout=30)
+        self.assertEqual(int(frames.stdout.strip()), 300)
+        subprocess.run([ffmpeg, "-hide_banner", "-loglevel", "error", "-xerror", "-i", str(self.output), "-f", "null", os.devnull], check=True, capture_output=True, timeout=30)
+        self.assertEqual(self.audio_hash(self.source), self.audio_hash(self.output))
+        self.assertEqual(hashlib.sha256(self.source.read_bytes()).digest(), source_hash)
+        self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
 
     def check_tiny_limits(self, size, caps):
         self.make_video(False, size=size, rate=10, duration=1)

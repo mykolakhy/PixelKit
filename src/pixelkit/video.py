@@ -274,15 +274,15 @@ def encode_to_target(ffmpeg: str, source: Path, output: Path, settings: VideoSet
         command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(output.absolute()), "-map", "0:a", "-vn", "-c:a", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-f", "mp4", str(audio_output.absolute())]
         encode_video(command, info.duration, cancelled, lambda value: None)
         audio_size = _encoded_size(audio_output)
-    # Leave room for the MP4 index and bitrate variation. Audio's own MP4 index
-    # is included in audio_size, making this deliberately conservative.
+    if audio_size >= target:
+        raise _limit_error(target)
+    # The reserve is only an estimate. Audio already includes its MP4 index,
+    # so even a near-exhausted estimated budget may fit at the minimum bitrate.
     reserve = min(max(4096, math.ceil(target * 0.03)), max(1, target // 4))
-    bitrate = math.floor((target - audio_size - reserve) * 8 / info.duration)
+    bitrate = max(1000, math.floor((target - audio_size - reserve) * 8 / info.duration))
     for attempt in range(MAX_TARGET_ATTEMPTS):
         if cancelled():
             raise ProcessingCancelled()
-        if bitrate < 1000:
-            break
         pass_log = output.parent / f"pass-{attempt}"
         for pass_number in (1, 2):
             stage = attempt * 2 + pass_number - 1
@@ -293,11 +293,13 @@ def encode_to_target(ffmpeg: str, source: Path, output: Path, settings: VideoSet
         size = _encoded_size(output)
         if size <= target:
             return
+        if bitrate == 1000:
+            break
         # Reduce proportionally to observed bytes, keeping the measured audio
         # fixed. Subtracting the reserve again can drive short clips below the
         # encoder's feasible bitrate even when a fitting result is possible.
         ratio = (target - audio_size) / max(1, size - audio_size)
-        bitrate = math.floor(bitrate * ratio * 0.95)
+        bitrate = max(1000, math.floor(bitrate * ratio * 0.95))
     raise _limit_error(target)
 
 
