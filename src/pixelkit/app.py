@@ -42,6 +42,7 @@ from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
 from pixelkit.target_size import TARGET_FORMATS, compress_to_size
 from pixelkit.video import VIDEO_SUFFIXES
 from pixelkit.video_panel import VideoPanel
+from pixelkit.video_presets import VideoPresetStore
 
 
 APP_TITLE = "PixelKit"
@@ -434,7 +435,7 @@ class ImageMagickStudio(QMainWindow):
         self.output_edit.textChanged.connect(self._output_path_changed)
         self.output_edit.textEdited.connect(lambda _text: setattr(self, "default_output", False))
         self._refresh_presets()
-        self.video_panel = VideoPanel(self.colors, DropListWidget(VIDEO_SUFFIXES, "videos"), self._show_message, self)
+        self.video_panel = VideoPanel(self.colors, DropListWidget(VIDEO_SUFFIXES, "videos"), self._show_message, self, preset_store=VideoPresetStore(self.preset_store.settings))
         self.media_stack.addWidget(self.video_panel)
         mode_group.idClicked.connect(self.media_stack.setCurrentIndex)
         self.media_stack.currentChanged.connect(lambda _index: self._update_action_state())

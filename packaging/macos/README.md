@@ -18,7 +18,7 @@ The builder reads the version from `src/pixelkit/__init__.py`. Pass `--version 1
 
 ```text
 dist/macos/arm64/PixelKit.app
-dist/macos/arm64/PixelKit-1.6.0-macOS-arm64.dmg
+dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg
 ```
 
 On Intel, the directory and disk image name use `x86_64`. Open the `.dmg` and drag **PixelKit.app** onto the **Applications** shortcut. The app supports Finder **Open With**, dropping images or MP4/MOV/M4V videos on its Dock icon, and ⌘O, ⌘S, ⌘W, and ⌘Q.
@@ -55,9 +55,9 @@ export PIXELKIT_CODESIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'
 PyInstaller signs the embedded binaries and the app with that identity and the hardened runtime. For public distribution, submit the resulting disk image to Apple's notary service using a Keychain profile you have configured, then staple the ticket:
 
 ```sh
-xcrun notarytool submit dist/macos/arm64/PixelKit-1.6.0-macOS-arm64.dmg \
+xcrun notarytool submit dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg \
   --keychain-profile PixelKit --wait
-xcrun stapler staple dist/macos/arm64/PixelKit-1.6.0-macOS-arm64.dmg
+xcrun stapler staple dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg
 ```
 
 Check the notary result before publishing. The repository workflow produces ad hoc builds; it does not contain signing credentials, notarize artifacts, or publish releases.
