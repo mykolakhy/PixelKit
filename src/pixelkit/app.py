@@ -38,6 +38,7 @@ from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_me
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
+from pixelkit.target_size import TARGET_FORMATS, compress_to_size
 
 
 APP_TITLE = "PixelKit"
@@ -155,11 +156,12 @@ class BatchWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(object)
 
-    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path) -> None:
+    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path, target_bytes: int | None = None) -> None:
         super().__init__()
         self.jobs = jobs
         self.output_dir = output_dir
         self.cancel_event = Event()
+        self.target_bytes = target_bytes
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -175,6 +177,7 @@ class BatchWorker(QThread):
             after = None
             error = None
             stopped = None
+            quality = None
             temporary = None
             temporary_dir = None
             try:
@@ -184,7 +187,11 @@ class BatchWorker(QThread):
                 temporary_dir = Path(tempfile.mkdtemp(prefix=".pixelkit-", dir=output.parent))
                 temporary = temporary_dir / output.name
                 converted_command = [*command[:-1], str(temporary)]
-                result = run_magick(converted_command, capture_output=True, text=True, timeout=300, cancel_requested=self.cancel_event.is_set)
+                if self.target_bytes is not None:
+                    quality = compress_to_size(converted_command, temporary, self.target_bytes, self.cancel_event.is_set)
+                    result = subprocess.CompletedProcess(converted_command, 0, "", "")
+                else:
+                    result = run_magick(converted_command, capture_output=True, text=True, timeout=300, cancel_requested=self.cancel_event.is_set)
                 if self.cancel_event.is_set():
                     raise ProcessingCancelled()
                 if result.returncode == 0 and temporary.is_file():
@@ -197,7 +204,7 @@ class BatchWorker(QThread):
                 stopped = "Cancelled"
             except subprocess.TimeoutExpired:
                 error = "Processing exceeded the 5-minute limit."
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 error = str(exc)
             finally:
                 if temporary_dir is not None:
@@ -205,7 +212,7 @@ class BatchWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Conversion completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(Path(command[1]), output, before, after, error, stopped))
+            files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality))
             self.progress.emit(index, len(self.jobs), source_name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
 
@@ -415,9 +422,9 @@ class ImageMagickStudio(QMainWindow):
         self._update_preset_controls()
 
     def _connect_preset_changes(self) -> None:
-        for edit in (self.width_edit, self.height_edit, self.long_side_edit, self.background_edit):
+        for edit in (self.width_edit, self.height_edit, self.long_side_edit, self.background_edit, self.target_size_edit):
             edit.textChanged.connect(self._preset_edited)
-        for checkbox in (self.keep_ratio, self.strip_metadata):
+        for checkbox in (self.keep_ratio, self.strip_metadata, self.target_size_check):
             checkbox.toggled.connect(self._preset_edited)
         self.quality_slider.valueChanged.connect(self._preset_edited)
         self.resize_mode.currentIndexChanged.connect(self._preset_edited)
@@ -459,6 +466,8 @@ class ImageMagickStudio(QMainWindow):
                 self.strip_metadata.setChecked(preset.strip_metadata)
                 self.background_edit.setText(preset.background)
                 self.format_combo.setCurrentText(preset.output_format)
+                self.target_size_check.setChecked(preset.target_kib is not None)
+                self.target_size_edit.setText(str(preset.target_kib or 500))
                 # Keep a manually chosen destination, with the preset's format.
                 if len(self.sources) == 1 and not self.default_output and self.output_edit.text().strip():
                     output = Path(self.output_edit.text().strip())
@@ -483,6 +492,7 @@ class ImageMagickStudio(QMainWindow):
             quality=self.quality_slider.value(), strip_metadata=self.strip_metadata.isChecked(),
             background=self.background_edit.text().strip() or "#ffffff",
             output_format=self.format_combo.currentText(),
+            target_kib=int(self.target_size_edit.text()) if self.target_size_check.isChecked() else None,
         )
 
     def _ask_preset_name(self, suggested: str) -> str | None:
@@ -693,7 +703,8 @@ class ImageMagickStudio(QMainWindow):
         layout.setSpacing(12)
         layout.addWidget(self._section_header("03", "Quality and metadata", "Optimize file size without unnecessary settings"))
         quality_row = QHBoxLayout()
-        quality_row.addWidget(QLabel("Quality"))
+        self.quality_caption = QLabel("Quality")
+        quality_row.addWidget(self.quality_caption)
         self.quality_slider = QSlider(Qt.Orientation.Horizontal)
         self.quality_slider.setRange(10, 100)
         self.quality_slider.setValue(82)
@@ -706,6 +717,24 @@ class ImageMagickStudio(QMainWindow):
         quality_row.addWidget(self.quality_slider, 1)
         quality_row.addWidget(self.quality_label)
         layout.addLayout(quality_row)
+        target_row = QHBoxLayout()
+        self.target_size_check = QCheckBox("Limit file size")
+        self.target_size_edit = QLineEdit("500")
+        self.target_size_edit.setValidator(QIntValidator(1, 1000000, self))
+        self.target_size_edit.setAccessibleName("Maximum size per output file in KiB")
+        self.target_size_edit.setMaximumWidth(90)
+        self.target_size_edit.setEnabled(False)
+        self.target_size_check.toggled.connect(self.target_size_edit.setEnabled)
+        self.target_size_check.toggled.connect(lambda enabled: self.quality_caption.setText("Max quality" if enabled else "Quality"))
+        target_row.addWidget(self.target_size_check)
+        target_row.addStretch()
+        target_row.addWidget(self.target_size_edit)
+        target_row.addWidget(QLabel("KiB"))
+        layout.addLayout(target_row)
+        note = QLabel("JPG, WEBP or AVIF · quality adjusts automatically")
+        note.setObjectName("infoLabel")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         self.strip_metadata = QCheckBox("Remove EXIF and other metadata")
         self.strip_metadata.setChecked(True)
         layout.addWidget(self.strip_metadata)
@@ -1135,12 +1164,22 @@ class ImageMagickStudio(QMainWindow):
             outputs = [output]
 
         jobs = [(self._build_command(source, target), target) for source, target in zip(self.sources, outputs)]
+        target_bytes = None
+        if self.target_size_check.isChecked():
+            try:
+                target_bytes = self._current_preset().target_kib * 1024
+            except ValueError as exc:
+                self._show_message(QMessageBox.Icon.Warning, "Check file-size limit", str(exc))
+                return
+            if any(target.suffix.lower().lstrip(".") not in TARGET_FORMATS for _, target in jobs):
+                self._show_message(QMessageBox.Icon.Warning, "Choose a supported format", "File-size limits support JPG, WEBP and AVIF. Choose one of these output formats.")
+                return
         self._set_processing_state(True)
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.progress.show()
         self._set_status(f"Processing 0 / {len(jobs)}…")
-        self.worker = BatchWorker(jobs, output if batch else output.parent)
+        self.worker = BatchWorker(jobs, output if batch else output.parent, target_bytes)
         self.worker.progress.connect(lambda current, total, name: self._set_progress(current, total, name))
         self.worker.finished.connect(self._processing_finished)
         self.worker.start()

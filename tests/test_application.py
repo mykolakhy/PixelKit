@@ -232,6 +232,30 @@ class ApplicationTests(unittest.TestCase):
             message.assert_called_once()
             ask.assert_not_called()
 
+    def test_target_size_rejects_empty_limit_and_unsupported_output_format(self):
+        source = self.root / "input.png"
+        source.touch()
+        self.window._set_sources([source])
+        self.window.target_size_check.setChecked(True)
+        self.window.target_size_edit.clear()
+        with patch.object(self.window, "_show_message") as message:
+            self.window._start_processing()
+            self.assertEqual(message.call_args.args[1], "Check file-size limit")
+        self.window.target_size_edit.setText("500")
+        with patch.object(self.window, "_show_message") as message:
+            self.window._start_processing()
+            self.assertEqual(message.call_args.args[1], "Choose a supported format")
+        self.assertIsNone(self.window.worker)
+
+    def test_target_limit_is_part_of_the_preset_and_locked_while_processing(self):
+        self.window.target_size_check.setChecked(True)
+        self.window.target_size_edit.setText("750")
+        self.assertEqual(self.window._current_preset().target_kib, 750)
+        self.window._set_processing_state(True)
+        self.assertFalse(self.window.target_size_edit.isEnabled())
+        self.window._set_processing_state(False)
+        self.assertTrue(self.window.target_size_edit.isEnabled())
+
 
 if __name__ == "__main__":
     unittest.main()
