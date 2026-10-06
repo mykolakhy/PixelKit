@@ -25,6 +25,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, and its codecs. Apple S
 - All processing is performed locally on your computer.
 - Built-in processing presets and your own saved presets, available after restarting the app.
 - Compression report after each batch: before/after sizes, savings, per-file formats and errors, and an output-folder shortcut. Totals include successful files only; larger outputs are shown explicitly.
+- Cancel an active batch: stop the current conversion, preserve completed files, and see cancelled/skipped files in the report. Partial output files are removed; existing destinations are replaced only after a conversion succeeds.
 
 ## Presets
 
