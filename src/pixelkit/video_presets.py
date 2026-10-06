@@ -100,7 +100,7 @@ class VideoPresetStore:
                     raise ValueError("Invalid video settings.")
                 presets[name] = VideoSettings(**values)
             result = _validated_presets(presets)
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, TypeError, AttributeError, RecursionError):
             self.load_error = True
             return {}
         self.load_error = False

@@ -105,6 +105,19 @@ class VideoPresetStoreTests(unittest.TestCase):
                 self.assertEqual(self.store.load(), {"Recovered": VideoSettings()})
                 self.assertFalse(self.store.load_error)
 
+    def test_deeply_nested_corrupt_json_recovers_without_startup_failure(self):
+        raw = "[" * 10000 + "0" + "]" * 10000
+        self.settings.setValue(self.store.KEY, raw)
+        self.assertEqual(self.store.load(), {})
+        self.assertTrue(self.store.load_error)
+        self.assertEqual(self.settings.value(self.store.KEY), raw)
+        recovered = {"Recovered": VideoSettings("small", 720, "remove", 25_000_000)}
+        self.store.save(recovered)
+        reopened = VideoPresetStore(QSettings(self.path, QSettings.Format.IniFormat))
+        self.assertEqual(reopened.load(), recovered)
+        self.assertFalse(reopened.load_error)
+        self.assertEqual(reopened.settings.value(self.store.BACKUP_KEY), raw)
+
     def test_empty_missing_optional_fields_and_non_text_storage(self):
         self.assertEqual(self.store.load(), {})
         self.assertFalse(self.store.load_error)
