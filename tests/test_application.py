@@ -75,9 +75,12 @@ class ApplicationTests(unittest.TestCase):
             target = self.root / f"output with spaces.{extension}"
             jobs.append((self.window._build_command(source, target), target))
         worker = BatchWorker(jobs, self.root)
-        worker.finished.connect(lambda *args: results.append(args))
+        worker.finished.connect(results.append)
         worker.run()
-        self.assertEqual(results[0][:3], (4, 4, []))
+        self.assertEqual(len(results[0].successful), 4)
+        self.assertEqual(len(results[0].files), 4)
+        self.assertEqual(results[0].before, source.stat().st_size * 4)
+        self.assertEqual(results[0].after, sum(target.stat().st_size for _, target in jobs))
         for _, target in jobs:
             result = run_magick([magick, "identify", "-format", "%wx%h", str(target)], capture_output=True, text=True, check=True)
             self.assertEqual(result.stdout, "60x40")
