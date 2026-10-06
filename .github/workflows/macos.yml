@@ -30,9 +30,9 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install build dependencies
         run: |
-          brew install imagemagick
+          brew install imagemagick ffmpeg
           python -m pip install -e '.[build]'
-      - name: Check runtime and image processing
+      - name: Check runtime, image processing and video compression
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s tests -v

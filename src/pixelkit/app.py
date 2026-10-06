@@ -11,6 +11,7 @@ from PyQt6.QtCore import QEvent, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QImageReader, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -39,6 +40,8 @@ from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStor
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
 from pixelkit.target_size import TARGET_FORMATS, compress_to_size
+from pixelkit.video import VIDEO_SUFFIXES
+from pixelkit.video_panel import VideoPanel
 
 
 APP_TITLE = "PixelKit"
@@ -108,14 +111,15 @@ class PixelKitApplication(QApplication):
 class DropListWidget(QListWidget):
     files_dropped = pyqtSignal(list)
 
-    def __init__(self) -> None:
+    def __init__(self, suffixes=None, media="images") -> None:
         super().__init__()
+        self.suffixes = SUPPORTED_SUFFIXES if suffixes is None else suffixes
         self.setAcceptDrops(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
-        self.setAccessibleName("Input images")
-        self.setAccessibleDescription("Drop image files or folders here, or use the file selection buttons.")
-        self.placeholder = QLabel("Drop images or folders here\nor use the buttons below", self.viewport())
+        self.setAccessibleName(f"Input {media}")
+        self.setAccessibleDescription(f"Drop {media} or folders here, or use the file selection buttons.")
+        self.placeholder = QLabel(f"Drop {media} or folders here\nor use the buttons below", self.viewport())
         self.placeholder.setObjectName("dropHint")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setWordWrap(True)
@@ -136,8 +140,8 @@ class DropListWidget(QListWidget):
         files: list[Path] = []
         for path in paths:
             if path.is_dir():
-                files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in SUPPORTED_SUFFIXES))
-            elif path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
+                files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
+            elif path.is_file() and path.suffix.lower() in self.suffixes:
                 files.append(path)
         if files:
             self.files_dropped.emit(files)
@@ -262,8 +266,8 @@ class ImageMagickStudio(QMainWindow):
     def _build_macos_menu(self) -> None:
         file_menu = self.menuBar().addMenu("File")
         for label, shortcut, callback in (
-            ("Open images…", QKeySequence.StandardKey.Open, self._choose_many),
-            ("Process and save", QKeySequence.StandardKey.Save, self._start_processing),
+            ("Open files…", QKeySequence.StandardKey.Open, self._open_current_mode),
+            ("Process and save", QKeySequence.StandardKey.Save, self._process_current_mode),
             ("Close", QKeySequence.StandardKey.Close, self.close),
         ):
             action = QAction(label, self)
@@ -281,12 +285,20 @@ class ImageMagickStudio(QMainWindow):
         file_menu.addAction(quit_action)
 
     def open_files(self, paths: list[Path]) -> None:
-        supported = [path for path in paths if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
-        if supported:
-            if self.worker and self.worker.isRunning():
-                self._show_message(QMessageBox.Icon.Information, "Processing images", "Wait for the current batch to finish before opening more images.")
+        images = [path for path in paths if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
+        videos = [path for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES]
+        if images or videos:
+            if self.processing or self.video_panel.processing or (self.worker and self.worker.isRunning()):
+                self._show_message(QMessageBox.Icon.Information, "Processing files", "Wait for the current batch to finish before opening more files.")
                 return
-            self._set_sources(supported)
+            if images and videos:
+                self._show_message(QMessageBox.Icon.Information, "Choose one media type", "Open images and videos as separate batches.")
+                return
+            self.mode_buttons[1 if videos else 0].click()
+            if videos:
+                self.video_panel.set_sources(videos)
+            else:
+                self._set_sources(images)
             self.showNormal()
             self.raise_()
             self.activateWindow()
@@ -313,17 +325,38 @@ class ImageMagickStudio(QMainWindow):
         title_box.setSpacing(2)
         title = QLabel(APP_TITLE)
         title.setObjectName("appTitle")
-        subtitle = QLabel("Resize, compress, and convert images")
+        subtitle = QLabel("Resize images and compress videos")
         subtitle.setObjectName("appSubtitle")
         title_box.addWidget(title)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
         badge = QLabel("LOCAL PROCESSING")
-        badge.setToolTip("Your images are processed on this computer.")
+        badge.setToolTip("Your files are processed on this computer.")
         badge.setObjectName("badge")
         header.addWidget(badge, alignment=Qt.AlignmentFlag.AlignTop)
         outer.addLayout(header)
+
+        mode_row = QHBoxLayout()
+        mode_group = QButtonGroup(self)
+        self.mode_buttons = []
+        for index, name in enumerate(("Images", "Video")):
+            button = QPushButton(name)
+            button.setObjectName("modeButton")
+            button.setCheckable(True)
+            mode_group.addButton(button, index)
+            mode_row.addWidget(button)
+            self.mode_buttons.append(button)
+        self.mode_buttons[0].setChecked(True)
+        mode_row.addStretch()
+        outer.addLayout(mode_row)
+        self.media_stack = QStackedWidget()
+        outer.addWidget(self.media_stack, 1)
+        image_page = QWidget()
+        self.media_stack.addWidget(image_page)
+        outer = QVBoxLayout(image_page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(18)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(10)
@@ -401,6 +434,24 @@ class ImageMagickStudio(QMainWindow):
         self.output_edit.textChanged.connect(self._output_path_changed)
         self.output_edit.textEdited.connect(lambda _text: setattr(self, "default_output", False))
         self._refresh_presets()
+        self.video_panel = VideoPanel(self.colors, DropListWidget(VIDEO_SUFFIXES, "videos"), self._show_message, self)
+        self.media_stack.addWidget(self.video_panel)
+        mode_group.idClicked.connect(self.media_stack.setCurrentIndex)
+        self.media_stack.currentChanged.connect(lambda _index: self._update_action_state())
+        self.video_panel.busy_changed.connect(lambda _busy: self._update_action_state())
+        self.video_panel.state_changed.connect(self._update_action_state)
+
+    def _open_current_mode(self) -> None:
+        if self.media_stack.currentIndex() == 1:
+            self.video_panel.choose_many()
+        else:
+            self._choose_many()
+
+    def _process_current_mode(self) -> None:
+        if self.media_stack.currentIndex() == 1:
+            self.video_panel.start_processing()
+        else:
+            self._start_processing()
 
     def _refresh_presets(self, selected: str | None = None) -> None:
         self.preset_combo.blockSignals(True)
@@ -835,6 +886,8 @@ class ImageMagickStudio(QMainWindow):
             QPushButton:focus {{ border-color: {c['teal']}; }}
             QPushButton:disabled {{ background: {c['card']}; color: {c['muted']}; border-color: {c['border']}; }}
             QPushButton#subtleButton {{ background: transparent; border: 1px solid transparent; color: {c['muted']}; }}
+            QPushButton#modeButton {{ min-width: 84px; }}
+            QPushButton#modeButton:checked {{ background: #302843; border-color: {c['accent']}; color: white; }}
             QPushButton#subtleButton:hover {{ color: white; background: #202a38; }}
             QPushButton#subtleButton:focus {{ border-color: {c['teal']}; }}
             QPushButton#subtleButton:disabled {{ color: #69788d; background: transparent; }}
@@ -867,10 +920,14 @@ class ImageMagickStudio(QMainWindow):
         ready = bool(self.magick and self.sources and self.output_edit.text().strip() and not self.processing)
         self.process_button.setEnabled(ready)
         self.clear_button.setEnabled(bool(self.sources) and not self.processing)
+        video_panel = getattr(self, "video_panel", None)
+        busy = self.processing or (video_panel is not None and video_panel.processing)
+        for button in getattr(self, "mode_buttons", ()):
+            button.setEnabled(not busy)
         if self.open_action:
-            self.open_action.setEnabled(not self.processing)
+            self.open_action.setEnabled(not busy)
         if self.save_action:
-            self.save_action.setEnabled(ready)
+            self.save_action.setEnabled(video_panel.process_button.isEnabled() if video_panel is not None and self.media_stack.currentIndex() == 1 else ready)
         self._update_preset_controls()
 
     def _set_processing_state(self, processing: bool) -> None:
@@ -1043,6 +1100,10 @@ class ImageMagickStudio(QMainWindow):
             self._set_sources([])
 
     def closeEvent(self, event) -> None:
+        if self.video_panel.processing or (self.video_panel.worker and self.video_panel.worker.isRunning()):
+            self._show_message(QMessageBox.Icon.Information, "Processing videos", "Cancel video processing or wait for it to finish before closing PixelKit.")
+            event.ignore()
+            return
         if self.worker and self.worker.isRunning():
             self._show_message(QMessageBox.Icon.Information, "Processing images", "Wait for image processing to finish before closing PixelKit.")
             event.ignore()

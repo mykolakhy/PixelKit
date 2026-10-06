@@ -1,7 +1,9 @@
-"""Check the packaged GUI and image codecs without a shell or Homebrew PATH."""
+"""Check the packaged GUI, image codecs and video runtime without Homebrew PATH."""
 from __future__ import annotations
 
 import argparse
+import json
+import plistlib
 import subprocess
 import tempfile
 from pathlib import Path
@@ -14,7 +16,14 @@ def verify(app: Path) -> None:
     frameworks = app / "Contents" / "Frameworks"
     executable = app / "Contents" / "MacOS" / "PixelKit"
     magick = resources / "imagemagick" / "bin" / "magick"
+    ffmpeg = resources / "ffmpeg" / "bin" / "ffmpeg"
+    ffprobe = resources / "ffmpeg" / "bin" / "ffprobe"
     assert executable.is_file() and magick.is_file(), "App or ImageMagick executable is missing"
+    assert ffmpeg.is_file() and ffprobe.is_file(), "FFmpeg or FFprobe executable is missing"
+    with (app / "Contents" / "Info.plist").open("rb") as source:
+        metadata = plistlib.load(source)
+    extensions = {extension for document in metadata.get("CFBundleDocumentTypes", []) for extension in document.get("CFBundleTypeExtensions", [])}
+    assert {"mp4", "mov", "m4v"}.issubset(extensions), "Video document registration is incomplete"
     for name in ("PixelKit.png", "PixelKit.ico", "check.svg", "chevron-down.svg", "chevron-up.svg"):
         assert (resources / "pixelkit" / "assets" / name).is_file(), f"Application resource is missing: {name}"
     # Check every bundled Mach-O dependency. Absolute Homebrew paths would make
@@ -47,6 +56,27 @@ def verify(app: Path) -> None:
             dimensions = run("identify", "-format", "%wx%h", str(output))
             assert dimensions == "48x32", f"Unexpected {extension} dimensions: {dimensions}"
             print(f"Verified {extension.upper()} encoding and decoding")
+        movie = root / "video output with spaces.mp4"
+        def video_run(binary: Path, *arguments: str) -> str:
+            result = subprocess.run([str(binary), *arguments], env=env, text=True, capture_output=True, timeout=60)
+            if result.returncode:
+                raise RuntimeError(f"Bundled {binary.name} failed: {result.stderr.strip()}")
+            return result.stdout
+
+        print(video_run(ffmpeg, "-version").splitlines()[0])
+        video_run(ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                  "-loop", "1", "-framerate", "10", "-i", str(source),
+                  "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "0.3",
+                  "-vf", "scale=48:32", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "26",
+                  "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(movie))
+        probe = json.loads(video_run(ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(movie)))
+        video = next(stream for stream in probe["streams"] if stream["codec_type"] == "video")
+        audio = next(stream for stream in probe["streams"] if stream["codec_type"] == "audio")
+        assert (video["codec_name"], video["width"], video["height"]) == ("h264", 48, 32), "Unexpected bundled video encoding"
+        assert audio["codec_name"] == "aac", "Unexpected bundled audio encoding"
+        assert float(probe["format"]["duration"]) > 0, "Bundled movie has no duration"
+        video_run(ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-i", str(movie), "-f", "null", "-")
+        print("Verified H.264/AAC video encoding, decoding and FFprobe inspection")
         # Check the GUI starts with only the packaged Python, Qt and resources.
         with (root / "gui.log").open("w+") as log:
             process = subprocess.Popen([str(executable)], env=env, cwd=root, stdout=log, stderr=log)

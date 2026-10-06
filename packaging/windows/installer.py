@@ -50,6 +50,12 @@ def install() -> Path:
     destination = install_root()
     if not payload.exists():
         raise FileNotFoundError("PixelKit files are missing from the installer.")
+    if not (payload / "PixelKit.exe").is_file():
+        raise FileNotFoundError("PixelKit.exe is missing from the installer.")
+    for name in ("ffmpeg.exe", "ffprobe.exe"):
+        candidates = [root / "ffmpeg" / layout / name for root in (payload / "_internal", payload) for layout in ("bin", "")]
+        if not any(path.is_file() for path in candidates):
+            raise FileNotFoundError(f"{name} is missing from the installer. Rebuild it with the FFmpeg runtime.")
     destination.mkdir(parents=True, exist_ok=True)
     shutil.copytree(payload, destination, dirs_exist_ok=True)
 
@@ -72,7 +78,7 @@ def main() -> None:
     frame = tk.Frame(root, bg="#0d1117", padx=28, pady=24)
     frame.pack(fill="both", expand=True)
     tk.Label(frame, text="PixelKit", bg="#0d1117", fg="#f4f7fb", font=("Segoe UI", 22, "bold")).pack(anchor="w")
-    tk.Label(frame, text="Installing the image editor", bg="#0d1117", fg="#93a0b3", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 18))
+    tk.Label(frame, text="Installing the image and video optimizer", bg="#0d1117", fg="#93a0b3", font=("Segoe UI", 10)).pack(anchor="w", pady=(3, 18))
     status = tk.Label(frame, text="Preparing…", bg="#0d1117", fg="#dce5f0", font=("Segoe UI", 10))
     status.pack(anchor="w")
     progress = ttk.Progressbar(frame, mode="indeterminate", length=440)

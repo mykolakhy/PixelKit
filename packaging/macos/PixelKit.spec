@@ -5,13 +5,20 @@ from pathlib import Path
 
 project = Path(SPECPATH).resolve().parents[1]
 prefix = Path(os.environ["PIXELKIT_MAGICK_PREFIX"])
+ffmpeg_prefix = Path(os.environ["PIXELKIT_FFMPEG_PREFIX"])
 icon = Path(os.environ["PIXELKIT_MACOS_ICON"])
 metadata = icon.parent / "magick-metadata"
 version = os.environ["PIXELKIT_VERSION"]
 identity = os.environ.get("PIXELKIT_CODESIGN_IDENTITY") or None
 
 binaries = [(str(prefix / "bin" / "magick"), "imagemagick/bin")]
+binaries.extend((str(ffmpeg_prefix / "bin" / name), "ffmpeg/bin") for name in ("ffmpeg", "ffprobe"))
 datas = [(str(project / "src" / "pixelkit" / "assets"), "pixelkit/assets")]
+datas.append((str(icon.parent / "ffmpeg-build.txt"), "licenses/FFmpeg"))
+for pattern in ("LICENSE*", "COPYING*", "NOTICE*"):
+    for source in sorted(ffmpeg_prefix.glob(pattern)):
+        if source.is_file():
+            datas.append((str(source), "licenses/FFmpeg"))
 # Explicitly collect dynamically loaded coders and filters. PyInstaller follows
 # their dylib dependencies and rewrites load paths for relocation inside .app.
 for source in sorted((prefix / "lib").rglob("*")):
@@ -90,6 +97,11 @@ app = BUNDLE(
             "CFBundleTypeRole": "Viewer",
             "LSHandlerRank": "Alternate",
             "CFBundleTypeExtensions": ["jpg", "jpeg", "png", "webp", "avif", "gif", "bmp", "tif", "tiff", "heic", "heif", "ico"],
+        }, {
+            "CFBundleTypeName": "Videos",
+            "CFBundleTypeRole": "Viewer",
+            "LSHandlerRank": "Alternate",
+            "CFBundleTypeExtensions": ["mp4", "mov", "m4v"],
         }],
     },
 )
