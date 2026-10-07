@@ -11,6 +11,7 @@ from PyQt6.QtCore import QEvent, QLocale, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QImageReader, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -115,7 +116,7 @@ class DropListWidget(QListWidget):
     def __init__(self, suffixes=None, media="images") -> None:
         super().__init__()
         self.suffixes = SUPPORTED_SUFFIXES if suffixes is None else suffixes
-        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setAccessibleName(f"Input {media}")
@@ -131,22 +132,47 @@ class DropListWidget(QListWidget):
         self.placeholder.setGeometry(self.viewport().rect().adjusted(16, 12, -16, -12))
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        self._accept_file_drag(event)
+
+    def dragMoveEvent(self, event) -> None:
+        # QListWidget's default handler checks its internal item MIME format
+        # and rejects external file URLs, even after dragEnterEvent accepts.
+        self._accept_file_drag(event)
+
+    @staticmethod
+    def _local_drop_paths(event) -> list[Path]:
+        return [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile() and url.toLocalFile()]
+
+    def _accept_file_drag(self, event) -> bool:
+        if self.isEnabled() and event.possibleActions() & Qt.DropAction.CopyAction:
+            for path in self._local_drop_paths(event):
+                try:
+                    if path.is_dir() or (path.is_file() and path.suffix.lower() in self.suffixes):
+                        # Import into the queue without asking the source app
+                        # to move or remove the original files.
+                        event.setDropAction(Qt.DropAction.CopyAction)
+                        event.accept()
+                        return True
+                except OSError:
+                    continue
+        event.ignore()
+        return False
 
     def dropEvent(self, event) -> None:
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if not self._accept_file_drag(event):
+            return
         files: list[Path] = []
-        for path in paths:
-            if path.is_dir():
-                files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
-            elif path.is_file() and path.suffix.lower() in self.suffixes:
-                files.append(path)
+        for path in self._local_drop_paths(event):
+            try:
+                if path.is_dir():
+                    files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
+                elif path.is_file() and path.suffix.lower() in self.suffixes:
+                    files.append(path)
+            except OSError:
+                # A folder may become unreadable or disappear during a drag.
+                continue
         if files:
             self.files_dropped.emit(files)
-            event.acceptProposedAction()
         else:
             event.ignore()
 
