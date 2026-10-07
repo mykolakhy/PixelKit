@@ -359,7 +359,7 @@ class ImageMagickStudio(QMainWindow):
         self.media_stack.addWidget(image_page)
         outer = QVBoxLayout(image_page)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(18)
+        outer.setSpacing(12)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(10)
@@ -410,9 +410,10 @@ class ImageMagickStudio(QMainWindow):
         self.source_card = self._source_card()
         self.resize_card = self._resize_card()
         self.quality_card = self._quality_card()
-        left.addWidget(self.source_card)
+        self.source_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.resize_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        left.addWidget(self.source_card, 1)
         left.addWidget(self.resize_card)
-        left.addStretch(1)
 
         right.addWidget(self.quality_card)
         right.addWidget(self._output_card())
@@ -662,15 +663,18 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("01", "Input images", "One file, multiple files, or an entire folder"))
 
         self.source_list = DropListWidget()
-        self.source_list.setFixedHeight(145)
-        self.source_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.source_list.setMinimumHeight(110)
+        self.source_list.setMaximumHeight(320)
+        # The list may use spare space, but its preferred height must not
+        # push the resize controls below the viewport.
+        self.source_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.source_list.files_dropped.connect(self._append_sources)
-        layout.addWidget(self.source_list)
+        layout.addWidget(self.source_list, 1)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
@@ -700,8 +704,8 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("02", "Resize", "Leave fields empty to keep the original size"))
         mode_row = QHBoxLayout()
         mode_label = QLabel("Resize mode")
@@ -771,8 +775,8 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("03", "Quality and metadata", "Optimize file size without unnecessary settings"))
         quality_row = QHBoxLayout()
         self.quality_caption = QLabel("Quality")
@@ -827,8 +831,8 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("04", "Export", "Output format and save location"))
         format_row = QHBoxLayout()
         format_row.addWidget(QLabel("Format"))
@@ -1217,12 +1221,6 @@ class ImageMagickStudio(QMainWindow):
             event.ignore()
             return
         super().closeEvent(event)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if hasattr(self, "source_list"):
-            # Give batches more visible rows when the window has room for them.
-            self.source_list.setFixedHeight(max(145, min(320, self.height() - 635)))
 
     def _selected_extension(self, source: Path | None = None) -> str:
         selected = self.format_combo.currentText().lower()

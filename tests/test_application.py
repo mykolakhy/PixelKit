@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QEvent, QLocale, QSettings
-from PyQt6.QtWidgets import QMessageBox
+from PyQt6.QtWidgets import QMessageBox, QScrollArea
 from pixelkit.app import BatchWorker, ImageMagickStudio, PixelKitApplication
 from pixelkit.runtime import find_magick, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, PresetStore
@@ -387,6 +387,32 @@ class ApplicationTests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(self.window.process_button.visibleRegion().isEmpty())
         self.assertEqual(self.window.resize_mode.accessibleName(), "Resize mode")
+
+    def test_image_settings_fit_default_and_large_windows_after_resizing_and_queue_changes(self):
+        files = [self.root / f"image {index:02d}.png" for index in range(60)]
+        for file in files:
+            file.touch()
+        self.window.show()
+        page = self.window.media_stack.widget(0)
+        columns = page.findChildren(QScrollArea)
+        for sources in ([], files[:1], files, []):
+            self.window._set_sources(sources)
+            for size in ((1040, 620), (1100, 780), (1440, 900), (1440, 1000), (1100, 780)):
+                self.window.resize(*size)
+                for mode in (0, 1):
+                    self.window.resize_mode.setCurrentIndex(mode)
+                    self.window.media_stack.setCurrentIndex(1)
+                    self.window.media_stack.setCurrentIndex(0)
+                    for _ in range(4):
+                        self.app.processEvents()
+                    with self.subTest(files=len(sources), size=size, mode=mode):
+                        self.assertFalse(self.window.process_button.visibleRegion().isEmpty())
+                        if size[1] >= 780:
+                            for column in columns:
+                                self.assertEqual(column.verticalScrollBar().maximum(), 0)
+                            self.assertEqual(self.window.resize_card.visibleRegion().boundingRect(), self.window.resize_card.rect())
+                        if sources == files:
+                            self.assertGreater(self.window.source_list.verticalScrollBar().maximum(), 0)
 
     def test_grouped_numbers_are_rejected_in_dimensions_and_file_size(self):
         previous_locale = QLocale()
