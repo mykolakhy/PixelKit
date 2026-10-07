@@ -580,7 +580,7 @@ class VideoPanel(QWidget):
         self.last_report = report
         self._set_busy(False)
         self.report_button.show()
-        self.status.setText(f"{'Cancelled' if report.cancelled else 'Done'}: {len(report.successful)} / {len(report.files)} videos")
+        self.status.setText(report.completion_status("videos"))
         self.show_report()
 
     def show_report(self) -> None:

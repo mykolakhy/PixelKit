@@ -89,6 +89,24 @@ class BatchReport:
         return tuple(file for file in self.files if file.succeeded)
 
     @property
+    def failed(self) -> tuple[FileResult, ...]:
+        return tuple(file for file in self.files if not file.succeeded and file.stopped is None)
+
+    def completion_status(self, unit: str = "files") -> str:
+        """Describe the outcome without presenting failed or stopped files as done."""
+        successful, failed = len(self.successful), len(self.failed)
+        if not self.files and not self.cancelled:
+            return "No files processed"
+        if self.cancelled:
+            outcome = "Cancelled"
+        elif failed:
+            outcome = "Completed" if successful else "Failed"
+        else:
+            outcome = "Done" if successful == len(self.files) else "Completed"
+        status = f"{outcome}: {successful} / {len(self.files)} {unit} saved"
+        return status + (f" · {failed} failed" if failed else "")
+
+    @property
     def before(self) -> int:
         return sum(file.before for file in self.successful)
 
@@ -117,11 +135,22 @@ class ReportDialog(QDialog):
         layout.setContentsMargins(24, 20, 24, 20)
         layout.setSpacing(14)
         count = len(report.successful)
-        summary = QLabel(f"{human_size(report.before)} → {human_size(report.after)}  ·  {size_change(report.before, report.after)}" if count else "No files processed successfully")
+        failed = len(report.failed)
+        if count:
+            summary_text = f"{human_size(report.before)} → {human_size(report.after)}  ·  {size_change(report.before, report.after)}"
+            if failed:
+                summary_text += f"  ·  {failed} failed"
+        elif report.cancelled:
+            summary_text = "Processing cancelled — no files saved"
+        elif failed:
+            summary_text = "Processing failed — no files saved"
+        else:
+            summary_text = "No files processed"
+        summary = QLabel(summary_text)
         summary.setObjectName("reportSummary")
         summary.setWordWrap(True)
         layout.addWidget(summary)
-        status = QLabel(("Batch cancelled. " if report.cancelled else "") + f"Successful: {count} / {len(report.files)}. Totals include successful files only.")
+        status = QLabel(("Batch cancelled. " if report.cancelled else "") + f"Successful: {count} / {len(report.files)}. " + (f"Failed: {failed}. " if failed else "") + "Totals include successful files only.")
         status.setWordWrap(True)
         layout.addWidget(status)
 
@@ -181,6 +210,11 @@ class ReportDialog(QDialog):
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        if report.files:
+            failed_row = next((row for row, file in enumerate(report.files) if not file.succeeded and file.stopped is None), None)
+            row = failed_row if failed_row is not None else next((row for row, file in enumerate(report.files) if not file.succeeded), 0)
+            self.table.selectRow(row)
+            self.table.scrollToItem(self.table.item(row, 0))
 
     def _selection_changed(self) -> None:
         self.technical_details_button.setChecked(False)

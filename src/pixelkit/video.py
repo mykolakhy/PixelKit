@@ -159,7 +159,11 @@ def video_command(ffmpeg: str, source: Path, output: Path, settings: VideoSettin
     scale = f"scale=w='max(2,trunc(iw*sar*{factor}/2)*2)':h='max(2,trunc(ih*{factor}/2)*2)':flags=lanczos,setsar=1"
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(source.absolute()), "-map", f"0:{info.stream_index}", "-vf", scale, "-c:v", "libx264", "-preset", speed]
     command.extend(("-crf", str(crf)) if video_bitrate is None else ("-b:v", str(video_bitrate)))
-    command.extend(("-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"))
+    # Screen recordings can have tightly spaced frames followed by long gaps.
+    # Keep the filter's timestamp precision instead of rounding to a nominal
+    # frame rate. Avoid B-frame reordering, which can shorten the MP4 track's
+    # advertised duration for these irregular timestamps.
+    command.extend(("-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-enc_time_base:v", "filter", "-bf:v", "0", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"))
     if pass_number is not None:
         if pass_number not in {1, 2} or video_bitrate is None or pass_log is None:
             raise ValueError("Two-pass encoding requires a bitrate and private pass log.")

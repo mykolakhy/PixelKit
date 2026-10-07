@@ -344,6 +344,21 @@ class VideoUiTests(unittest.TestCase):
         self.assertTrue(all(button.isEnabled() for button in self.window.mode_buttons))
         self.assertIn("Cancelled", self.panel.status.text())
 
+    def test_video_completion_surfaces_all_failed_and_mixed_results(self):
+        good = FileResult(self.root / "good.mov", self.root / "good.mp4", 100, 40, media_type="video")
+        bad = FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, "Could not compress this video", media_type="video")
+        cases = (
+            ((bad,), "Failed: 0 / 1 videos saved · 1 failed"),
+            ((good, bad), "Completed: 1 / 2 videos saved · 1 failed"),
+        )
+        for files, expected in cases:
+            with self.subTest(expected=expected), patch("pixelkit.video_panel.ReportDialog") as dialog:
+                report = BatchReport(files, self.root)
+                self.panel._finished(report)
+                self.assertEqual(self.panel.status.text(), expected)
+                self.assertIs(self.panel.last_report, report)
+                dialog.assert_called_once_with(report, self.panel)
+
     def test_finder_cannot_replace_video_batch_and_close_is_blocked(self):
         source = self.video("first.mov")
         other = self.video("second.mp4")

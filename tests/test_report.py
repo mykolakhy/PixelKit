@@ -40,6 +40,81 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(size_change(100, 100), "No change")
         self.assertEqual(size_change(0, 1), "—")
 
+    def test_completion_status_distinguishes_failures_successes_and_cancellation(self):
+        good = FileResult(self.root / "one.png", self.root / "one.webp", 100, 40)
+        bad = FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "Encoding failed")
+        cancelled = FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled")
+        skipped = FileResult(self.root / "skipped.png", self.root / "skipped.webp", 100, None, "Not processed", stopped="Skipped")
+        cases = (
+            ((good,), False, "Done: 1 / 1 files saved"),
+            ((bad,), False, "Failed: 0 / 1 files saved · 1 failed"),
+            ((good, bad), False, "Completed: 1 / 2 files saved · 1 failed"),
+            ((good, cancelled, skipped), True, "Cancelled: 1 / 3 files saved"),
+            ((bad, cancelled, skipped), True, "Cancelled: 0 / 3 files saved · 1 failed"),
+            ((), False, "No files processed"),
+        )
+        for files, was_cancelled, expected in cases:
+            with self.subTest(expected=expected):
+                report = BatchReport(files, self.root, cancelled=was_cancelled)
+                self.assertEqual(report.completion_status(), expected)
+                self.assertEqual(report.failed, tuple(file for file in files if file is bad))
+
+    def test_report_opens_on_first_failure_ahead_of_successful_and_stopped_files(self):
+        files = (
+            FileResult(self.root / "good.png", self.root / "good.webp", 100, 40),
+            FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled"),
+            FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "The first failed conversion"),
+            FileResult(self.root / "second.png", self.root / "second.webp", 100, None, "Another failed conversion"),
+        )
+        dialog = ReportDialog(BatchReport(files, self.root, cancelled=True))
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.currentRow(), 2)
+        self.assertEqual(dialog.details.toPlainText(), "The first failed conversion")
+        self.assertFalse(dialog.compare_button.isEnabled())
+        self.assertIn("2 failed", dialog.findChild(QLabel, "reportSummary").text())
+
+    def test_report_scrolls_to_initial_failure_in_a_long_batch(self):
+        files = tuple(FileResult(self.root / f"{row}.png", self.root / f"{row}.webp", 100, 40) for row in range(50))
+        failure = FileResult(self.root / "failed.png", self.root / "failed.webp", 100, None, "Could not encode this file")
+        dialog = ReportDialog(BatchReport(files + (failure,), self.root))
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+        self.assertEqual(dialog.table.currentRow(), 50)
+        self.assertEqual(dialog.details.toPlainText(), failure.error)
+        self.assertGreater(dialog.table.verticalScrollBar().value(), 0)
+        self.assertTrue(dialog.table.viewport().rect().intersects(dialog.table.visualItemRect(dialog.table.item(50, 0))))
+
+    def test_report_opens_on_stopped_file_or_first_success_and_leaves_empty_report_blank(self):
+        good = FileResult(self.root / "good.png", self.root / "good.webp", 100, 40)
+        cancelled = FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled")
+        skipped = FileResult(self.root / "skipped.png", self.root / "skipped.webp", 100, None, "Not processed", stopped="Skipped")
+        cases = (
+            ((good, cancelled, skipped), True, 1, "Processing cancelled"),
+            ((good,), False, 0, str(good.output)),
+            ((), False, -1, ""),
+        )
+        for files, was_cancelled, row, details in cases:
+            with self.subTest(row=row):
+                dialog = ReportDialog(BatchReport(files, self.root, cancelled=was_cancelled))
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.table.currentRow(), row)
+                self.assertEqual(dialog.details.toPlainText(), details)
+
+    def test_report_headline_explains_all_failed_and_cancelled_batches(self):
+        bad = FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, "Video encoding failed", media_type="video")
+        cancelled = FileResult(self.root / "cancelled.mov", self.root / "cancelled.mp4", 100, None, "Processing cancelled", stopped="Cancelled", media_type="video")
+        cases = (
+            ((bad,), False, "Processing failed — no files saved"),
+            ((cancelled,), True, "Processing cancelled — no files saved"),
+            ((), False, "No files processed"),
+        )
+        for files, was_cancelled, headline in cases:
+            with self.subTest(headline=headline):
+                dialog = ReportDialog(BatchReport(files, self.root, cancelled=was_cancelled))
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.findChild(QLabel, "reportSummary").text(), headline)
+
     def test_binary_sizes_use_unambiguous_units_in_summary_and_table(self):
         self.assertEqual(human_size(0), "0 B")
         self.assertEqual(human_size(1023), "1023 B")

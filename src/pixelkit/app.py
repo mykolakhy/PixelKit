@@ -1385,7 +1385,7 @@ class ImageMagickStudio(QMainWindow):
         self.last_report = report
         self._set_processing_state(False)
         self.progress.hide()
-        self._set_status(f"{'Cancelled' if report.cancelled else 'Done'}: {len(report.successful)} / {len(report.files)} files")
+        self._set_status(report.completion_status())
         self._show_last_report()
 
     def _show_last_report(self) -> None:

@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import QMessageBox, QScrollArea
 from pixelkit.app import BatchWorker, ImageMagickStudio, PixelKitApplication
 from pixelkit.runtime import find_magick, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, PresetStore
-from pixelkit.report import BatchReport
+from pixelkit.report import BatchReport, FileResult
 
 
 class ApplicationTests(unittest.TestCase):
@@ -146,6 +146,21 @@ class ApplicationTests(unittest.TestCase):
         self.assertTrue(self.window.cancel_button.isHidden())
         self.assertTrue(self.window.width_edit.isEnabled())
         self.assertIn("Cancelled", self.window.status_label.full_text)
+
+    def test_image_completion_surfaces_all_failed_and_mixed_results(self):
+        good = FileResult(self.root / "good.png", self.root / "good.webp", 100, 40)
+        bad = FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "Could not convert this image")
+        cases = (
+            ((bad,), "Failed: 0 / 1 files saved · 1 failed"),
+            ((good, bad), "Completed: 1 / 2 files saved · 1 failed"),
+        )
+        for files, expected in cases:
+            with self.subTest(expected=expected), patch("pixelkit.app.ReportDialog") as dialog:
+                report = BatchReport(files, self.root)
+                self.window._processing_finished(report)
+                self.assertEqual(self.window.status_label.full_text, expected)
+                self.assertIs(self.window.last_report, report)
+                dialog.assert_called_once_with(report, self.window)
 
     def test_builtin_preset_applies_to_all_batch_commands(self):
         files = [self.root / "first.png", self.root / "second.jpg"]
