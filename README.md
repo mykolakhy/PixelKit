@@ -26,6 +26,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Built-in processing presets and your own saved presets, available after restarting the app.
 - Compression report after each batch: before/after sizes, savings, per-file formats and errors, and an output-folder shortcut. Totals include successful files only; larger outputs are shown explicitly.
 - Select a failed image or video in the report, then use **Copy error log** or **Save error log…** to share its full error with PixelKit version and input/output paths. Logs are saved locally as UTF-8 text, including original diagnostics even when the report shows a shorter explanation.
+- Prepare a bug report through **Help → Report a bug…**, the header button, or a selected failed row in the compression report. Describe the steps and actual/expected result, review or edit the automatic technical details, then check **Preview**. Automatic details hide personal paths and file names; a failure includes the settings captured for that processing run. **Continue on GitHub** opens a draft for you to publish with your GitHub account. Reports there are public; media and screenshots are attached manually. Long reports offer **Copy report & open GitHub** so the full text can be pasted without truncation. **Copy report** and **Save report…** work offline. Drafts stay in memory when reopened during the current app session; save a report before quitting if you need to keep it.
 - Cancel an active batch: stop the current conversion, preserve completed files, and see cancelled/skipped files in the report. Partial output files are removed; existing destinations are replaced only after a conversion succeeds.
 - Limit each output to a requested size for JPG, WEBP or AVIF. Enable **Limit file size**, enter a limit in KiB (1 KiB = 1024 bytes), and select a supported output format. Quality is searched automatically up to the slider's **Max quality**; image dimensions and other settings stay as configured. Unreachable limits are reported without publishing an oversized file. Custom presets retain the limit.
 
@@ -91,6 +92,8 @@ src/pixelkit/       Application package and bundled icons
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets
   report.py        Per-file results and compression report
+  bug_report.py    Sanitized bug diagnostics, GitHub links and safe report export
+  bug_report_dialog.py Editable bug-report drafts and preview
   comparison.py    On-demand original/result comparison
   video.py         Video probing, compression and cancellable worker
   video_panel.py   Video settings, queue and result report

@@ -328,13 +328,18 @@ class VideoWorker(QThread):
         ffmpeg, ffprobe = find_ffmpeg(), find_ffprobe()
         tool_error = None
         tools_checked = False
+        processing_settings = (
+            ("Quality preset", self.settings.preset),
+            ("Resolution", f"Up to {self.settings.max_height}p" if self.settings.max_height else "Original resolution"),
+            ("Audio", self.settings.audio),
+        )
         source_paths = {source.resolve() for source, _ in self.jobs}
         # Default macOS and Windows volumes are case-insensitive. Conservatively
         # reject case-only duplicate destinations on every platform.
         destination_counts = Counter(str(output.resolve()).casefold() for _, output in self.jobs)
         for index, (source, output) in enumerate(self.jobs, start=1):
             if self.cancel_event.is_set():
-                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video", target_bytes=self.settings.target_bytes))
+                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video", target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
                 continue
             started = time.monotonic()
             before = after = None
@@ -386,6 +391,6 @@ class VideoWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Compression completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes))
+            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
             self.progress.emit(index, len(self.jobs), source.name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))

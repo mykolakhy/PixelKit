@@ -10,6 +10,8 @@ from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
 
 from pixelkit import __version__
+from pixelkit.bug_report import BugReportContext
+from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.comparison import ComparisonDialog
 
 
@@ -75,6 +77,7 @@ def error_log(file: FileResult) -> str:
         context.append(f"File-size limit: {file.target_bytes} bytes")
     if file.quality is not None:
         context.append(f"Quality used: {file.quality}")
+    context.extend(f"{key}: {value}" for key, value in file.processing_settings)
     return "\n".join(context) + "\n\nError:\n" + (file.error or "")
 
 
@@ -90,6 +93,7 @@ class FileResult:
     media_type: str = "image"
     elapsed_seconds: float | None = None
     target_bytes: int | None = None
+    processing_settings: tuple[tuple[str, str], ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -141,6 +145,7 @@ class ReportDialog(QDialog):
     def __init__(self, report: BatchReport, parent=None) -> None:
         super().__init__(parent)
         self.report = report
+        self._bug_dialogs: dict[int, BugReportDialog] = {}
         self.setWindowTitle("Compression report")
         self.setObjectName("compressionReport")
         self.resize(820, 520)
@@ -237,6 +242,10 @@ class ReportDialog(QDialog):
         self.compare_button.setVisible(not video_report)
         self.compare_button.clicked.connect(self._compare_images)
         buttons.addWidget(self.compare_button)
+        self.report_bug_button = QPushButton("Report a bug…")
+        self.report_bug_button.setToolTip("Prepare a public bug report for the selected failed file")
+        self.report_bug_button.clicked.connect(self._report_bug)
+        buttons.addWidget(self.report_bug_button)
         buttons.addStretch()
         close = QPushButton("Close")
         close.setDefault(True)
@@ -259,7 +268,7 @@ class ReportDialog(QDialog):
     def _update_details(self) -> None:
         row = self.table.currentRow() if self.table.selectionModel().hasSelection() else -1
         can_export = self._selected_failure() is not None
-        for button in (self.copy_error_button, self.save_error_button):
+        for button in (self.copy_error_button, self.save_error_button, self.report_bug_button):
             button.setVisible(can_export)
             button.setEnabled(can_export)
         self.compare_button.setEnabled(False)
@@ -289,6 +298,26 @@ class ReportDialog(QDialog):
             return None
         file = self.report.files[row]
         return file if file.error and file.stopped is None and not file.succeeded else None
+
+    def _report_bug(self) -> None:
+        file = self._selected_failure()
+        if file is None:
+            return
+        context = BugReportContext(
+            mode="Video" if file.media_type == "video" else "Images", file=file,
+            protected_paths=tuple(path for result in self.report.files for path in (result.source, result.output)),
+        )
+        parent = self.parentWidget()
+        while parent is not None:
+            handler = getattr(parent, "_show_bug_report", None)
+            if callable(handler):
+                handler(context)
+                return
+            parent = parent.parentWidget()
+        key = self.table.currentRow()
+        if key not in self._bug_dialogs:
+            self._bug_dialogs[key] = BugReportDialog(context, self)
+        self._bug_dialogs[key].exec()
 
     def _copy_error_log(self) -> None:
         file = self._selected_failure()

@@ -4,6 +4,7 @@ import subprocess
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from threading import Event
 from pathlib import Path
 
@@ -37,6 +38,8 @@ from PyQt6.QtWidgets import (
 )
 
 from pixelkit import __version__
+from pixelkit.bug_report import BugReportContext
+from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -198,11 +201,25 @@ class BatchWorker(QThread):
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def _processing_settings(self, command: list[str]) -> tuple[tuple[str, str], ...]:
+        options = command[2:-1]
+        settings = [("Auto orient", "Yes" if "-auto-orient" in options else "No"),
+                    ("Remove metadata", "Yes" if "-strip" in options else "No")]
+        for flag, name in (("-resize", "Resize geometry"), ("-quality", "Maximum quality"), ("-background", "JPEG background")):
+            if flag in options and options.index(flag) + 1 < len(options):
+                settings.append((name, str(options[options.index(flag) + 1])))
+        if "-resize" not in options:
+            settings.append(("Resize geometry", "Original dimensions"))
+        if self.target_bytes is not None:
+            settings.append(("File-size limit", f"{self.target_bytes} bytes"))
+        return tuple(settings)
+
     def run(self) -> None:
         files = []
         for index, (command, output) in enumerate(self.jobs, start=1):
+            settings = self._processing_settings(command)
             if self.cancel_event.is_set():
-                files.append(FileResult(Path(command[1]), output, None, None, "Not processed because the batch was cancelled.", "Skipped"))
+                files.append(FileResult(Path(command[1]), output, None, None, "Not processed because the batch was cancelled.", "Skipped", processing_settings=settings))
                 continue
             source_name = Path(command[1]).name
             before = None
@@ -244,7 +261,7 @@ class BatchWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Conversion completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality))
+            files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality, processing_settings=settings))
             self.progress.emit(index, len(self.jobs), source_name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
 
@@ -260,6 +277,7 @@ class ImageMagickStudio(QMainWindow):
         self.save_action: QAction | None = None
         self.worker: BatchWorker | None = None
         self.last_report: BatchReport | None = None
+        self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
         self.field_errors: dict[QLineEdit, QLabel] = {}
         self.preset_store = preset_store if preset_store is not None else PresetStore()
         self.custom_presets = self.preset_store.load()
@@ -288,6 +306,7 @@ class ImageMagickStudio(QMainWindow):
 
         if sys.platform == "darwin":
             self._build_macos_menu()
+        self._build_help_menu()
         self._update_action_state()
 
         if not self.magick:
@@ -313,6 +332,42 @@ class ImageMagickStudio(QMainWindow):
         quit_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Quit))
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+    def _build_help_menu(self) -> None:
+        menu = self.menuBar().addMenu("Help")
+        self.report_bug_action = QAction("Report a bug…", self)
+        self.report_bug_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.report_bug_action.triggered.connect(lambda: self._show_bug_report())
+        menu.addAction(self.report_bug_action)
+
+    def _protected_bug_paths(self) -> tuple[Path, ...]:
+        paths = [*self.sources, *self.video_panel.sources]
+        if self.worker is not None:
+            paths.extend(path for command, output in self.worker.jobs for path in (Path(command[1]), output))
+        if self.video_panel.worker is not None:
+            paths.extend(path for source, output in self.video_panel.worker.jobs for path in (source, output))
+        for report in (self.last_report, self.video_panel.last_report):
+            if report is not None:
+                paths.extend(path for file in report.files for path in (file.source, file.output))
+        for edit in (self.output_edit, self.video_panel.output_edit):
+            if edit.text().strip():
+                try:
+                    paths.append(Path(edit.text().strip()).expanduser())
+                except (OSError, ValueError, RuntimeError):
+                    pass
+        return tuple(dict.fromkeys(paths))
+
+    def _show_bug_report(self, context: BugReportContext | None = None) -> None:
+        if context is None:
+            context = BugReportContext(mode="Video" if self.media_stack.currentIndex() else "Images")
+        key = ("failure", id(context.file)) if context.file is not None else ("general", context.mode)
+        protected = tuple(dict.fromkeys((*context.protected_paths, *self._protected_bug_paths())))
+        if key not in self._bug_report_dialogs:
+            self._bug_report_dialogs[key] = BugReportDialog(replace(context, protected_paths=protected), self)
+        dialog = self._bug_report_dialogs[key]
+        dialog.context = replace(dialog.context, protected_paths=tuple(dict.fromkeys((*dialog.context.protected_paths, *protected))))
+        dialog.protected_paths_provider = self._protected_bug_paths
+        dialog.exec()
 
     def open_files(self, paths: list[Path]) -> None:
         images = [path for path in paths if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
@@ -369,6 +424,11 @@ class ImageMagickStudio(QMainWindow):
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+        self.report_bug_button = QPushButton("Report a bug…")
+        self.report_bug_button.setObjectName("subtleButton")
+        self.report_bug_button.setToolTip("Describe a problem and prepare a public GitHub report")
+        self.report_bug_button.clicked.connect(lambda: self._show_bug_report())
+        header.addWidget(self.report_bug_button, alignment=Qt.AlignmentFlag.AlignTop)
         badge = QLabel("LOCAL PROCESSING")
         badge.setToolTip("Your files are processed on this computer.")
         badge.setObjectName("badge")
