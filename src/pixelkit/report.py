@@ -14,8 +14,8 @@ from pixelkit.comparison import ComparisonDialog
 
 def human_size(value: int) -> str:
     size = float(value)
-    for unit in ("B", "KB", "MB", "GB"):
-        if size < 1024 or unit == "GB":
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if size < 1024 or unit == "GiB":
             return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
 
@@ -29,6 +29,31 @@ def size_change(before: int, after: int) -> str:
     if percentage < 0:
         return f"Larger {abs(percentage):.1f}%"
     return "No change"
+
+
+def _image_error_message(error: str) -> str | None:
+    """Explain known conversion failures without changing their diagnostics."""
+    message = error.casefold()
+    # A second failure during cleanup needs to remain visible too.
+    if "could not remove temporary files" in message:
+        return None
+    if any(reason in message for reason in ("permission denied", "operation not permitted", "access is denied", "read-only file system")):
+        return "PixelKit could not access a file or folder. Check that the original image is readable and the output folder is writable, then try again."
+    if any(reason in message for reason in ("improper image header", "insufficient image data", "corrupt image", "unexpected end-of-file", "not enough image data", "invalid jpeg file structure")):
+        return "This image appears to be damaged or incomplete. Open it in another app and export a fresh copy, or choose a different original file."
+    if "no decode delegate for this image format" in message:
+        return "PixelKit cannot read this image format. Export the image as PNG or JPEG in another app, then try again."
+    if "no encode delegate for this image format" in message:
+        return "PixelKit cannot save this image format. Choose PNG or JPEG as the output format, then try again."
+    if "no such file or directory" in message:
+        return "A required file or folder could not be found. Check that the original image and output folder still exist, then try again."
+    return None
+
+
+def _result_error_message(file: FileResult) -> str | None:
+    if file.media_type == "image" and file.error and file.stopped is None:
+        return _image_error_message(file.error)
+    return None
 
 
 @dataclass(frozen=True)
@@ -83,7 +108,8 @@ class ReportDialog(QDialog):
         self.setStyleSheet("""
             QDialog#compressionReport { background: #151b24; }
             QLabel#reportSummary { font-size: 20px; font-weight: 600; }
-            QTableWidget { background: #202a38; alternate-background-color: #1b2532; border: 1px solid #697d97; border-radius: 8px; gridline-color: #2b3747; selection-background-color: #302843; }
+            QTableWidget { background: #202a38; alternate-background-color: #1b2532; border: 1px solid #697d97; border-radius: 8px; gridline-color: #2b3747; selection-background-color: #302843; selection-color: #f4f7fb; }
+            QTableWidget::item:selected { background: #302843; color: #f4f7fb; }
             QHeaderView::section { background: #151b24; color: #f4f7fb; border: none; padding: 8px; font-weight: 600; }
             QPlainTextEdit { background: #202a38; color: #f4f7fb; border: 1px solid #697d97; border-radius: 8px; padding: 6px; }
         """)
@@ -120,7 +146,7 @@ class ReportDialog(QDialog):
                 values.append(f"{file.target_bytes / 1000000:g} MB" if file.target_bytes is not None else "—")
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                item.setToolTip(file.error if column == 5 and file.error else str(file.source if column == 0 else file.output))
+                item.setToolTip((_result_error_message(file) or file.error) if column == 5 and file.error else str(file.source if column == 0 else file.output))
                 self.table.setItem(row, column, item)
         layout.addWidget(self.table, 1)
         self.details = QPlainTextEdit()
@@ -128,7 +154,16 @@ class ReportDialog(QDialog):
         self.details.setAccessibleName("Selected file output path or error details")
         self.details.setPlaceholderText("Select a file to see its output path or error details")
         self.details.setFixedHeight(76)
+        self.technical_details_button = QPushButton("Show technical details")
+        self.technical_details_button.setCheckable(True)
+        self.technical_details_button.setVisible(False)
+        self.technical_details_button.setToolTip("Show the original converter message for troubleshooting")
+        self.technical_details_button.toggled.connect(self._update_details)
         self.table.itemSelectionChanged.connect(self._selection_changed)
+        details_actions = QHBoxLayout()
+        details_actions.addStretch()
+        details_actions.addWidget(self.technical_details_button)
+        layout.addLayout(details_actions)
         layout.addWidget(self.details)
         buttons = QHBoxLayout()
         self.open_folder = QPushButton("Open output folder")
@@ -148,16 +183,31 @@ class ReportDialog(QDialog):
         layout.addLayout(buttons)
 
     def _selection_changed(self) -> None:
-        row = self.table.currentRow()
+        self.technical_details_button.setChecked(False)
+        self._update_details()
+
+    def _update_details(self) -> None:
+        row = self.table.currentRow() if self.table.selectionModel().hasSelection() else -1
         self.compare_button.setEnabled(False)
         if row >= 0:
             file = self.report.files[row]
+            explanation = _result_error_message(file)
+            self.technical_details_button.setVisible(explanation is not None)
+            error = file.error
+            if explanation:
+                expanded = self.technical_details_button.isChecked()
+                self.technical_details_button.setText("Hide technical details" if expanded else "Show technical details")
+                error = "Technical details:\n" + file.error if expanded else explanation
             quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
             limit = f"\nLimit: {file.target_bytes / 1000000:g} MB ({file.target_bytes:,} bytes)" if file.target_bytes is not None else ""
             actual = f"\nActual size: {file.after / 1000000:g} MB ({file.after:,} bytes)" if file.target_bytes is not None and file.succeeded else ""
-            self.details.setPlainText((file.error or (str(file.output) + quality)) + limit + actual)
-            self.details.setToolTip(file.error or str(file.output))
+            self.details.setPlainText((error or (str(file.output) + quality)) + limit + actual)
+            self.details.setToolTip(explanation or file.error or str(file.output))
             self.compare_button.setEnabled(file.media_type == "image" and file.succeeded and file.source.is_file() and file.output.is_file())
+        else:
+            self.technical_details_button.setVisible(False)
+            self.details.clear()
+            self.details.setToolTip("")
 
     def _compare_images(self) -> None:
         row = self.table.currentRow()

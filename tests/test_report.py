@@ -9,9 +9,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
 from pixelkit.app import BatchWorker
-from pixelkit.report import BatchReport, FileResult, ReportDialog, size_change
+from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size, size_change
 
 
 class ReportTests(unittest.TestCase):
@@ -37,6 +39,18 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(size_change(100, 150), "Larger 50.0%")
         self.assertEqual(size_change(100, 100), "No change")
         self.assertEqual(size_change(0, 1), "—")
+
+    def test_binary_sizes_use_unambiguous_units_in_summary_and_table(self):
+        self.assertEqual(human_size(0), "0 B")
+        self.assertEqual(human_size(1023), "1023 B")
+        self.assertEqual(human_size(1024), "1.0 KiB")
+        self.assertEqual(human_size(1024 ** 2), "1.0 MiB")
+        self.assertEqual(human_size(1024 ** 3), "1.0 GiB")
+        dialog = ReportDialog(BatchReport((FileResult(self.root / "one.png", self.root / "one.webp", 1024 ** 2, 1024),), self.root))
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.item(0, 2).text(), "1.0 MiB")
+        self.assertEqual(dialog.table.item(0, 3).text(), "1.0 KiB")
+        self.assertIn("1.0 MiB → 1.0 KiB", dialog.findChild(QLabel, "reportSummary").text())
 
     def test_worker_captures_original_size_before_conversion_and_reports_failures(self):
         jobs = []
@@ -121,6 +135,80 @@ class ReportTests(unittest.TestCase):
         dialog = ReportDialog(BatchReport((), self.root / "missing"))
         self.addCleanup(dialog.close)
         self.assertFalse(dialog.open_folder.isEnabled())
+
+    def test_known_image_errors_show_recovery_and_preserve_optional_diagnostics(self):
+        cases = (
+            ("magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956.", "damaged or incomplete", "export a fresh copy"),
+            ("magick: no decode delegate for this image format `UNKNOWN' @ error/constitute.c/ReadImage/587.", "cannot read this image format", "Export the image as PNG or JPEG"),
+            ("magick: no encode delegate for this image format `UNKNOWN' @ error/constitute.c/WriteImage/1301.", "cannot save this image format", "Choose PNG or JPEG"),
+            ("magick: unable to open image `private.png': Permission denied @ error/blob.c/OpenBlob/3596.", "could not access", "original image is readable"),
+            ("[WinError 5] Access is denied: 'private.png'", "could not access", "output folder is writable"),
+            ("[Errno 30] Read-only file system: 'out.png'", "could not access", "output folder is writable"),
+            ("[Errno 2] No such file or directory: 'gone.png'", "could not be found", "still exist"),
+        )
+        for error, cause, recovery in cases:
+            with self.subTest(error=error):
+                file = FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, error)
+                dialog = ReportDialog(BatchReport((file,), self.root))
+                self.addCleanup(dialog.close)
+                dialog.table.selectRow(0)
+                self.assertIn(cause, dialog.details.toPlainText())
+                self.assertIn(recovery, dialog.details.toPlainText())
+                self.assertNotIn(error, dialog.details.toPlainText())
+                self.assertFalse(dialog.technical_details_button.isHidden())
+                self.assertEqual(dialog.technical_details_button.text(), "Show technical details")
+                dialog.technical_details_button.click()
+                self.assertIn("Technical details:\n" + error, dialog.details.toPlainText())
+                self.assertEqual(dialog.technical_details_button.text(), "Hide technical details")
+                self.assertEqual(file.error, error)
+                dialog.technical_details_button.click()
+                self.assertNotIn(error, dialog.details.toPlainText())
+
+    def test_unknown_video_and_cleanup_errors_stay_complete_and_selection_resets_details(self):
+        known_error = "magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956."
+        unknown_error = "Encoding error\n" * 100
+        cleanup_error = known_error + "\nCould not remove temporary files at /tmp/output: Permission denied"
+        files = (
+            FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, known_error),
+            FileResult(self.root / "unknown.png", self.root / "unknown.jpg", 100, None, unknown_error),
+            FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, known_error, media_type="video"),
+            FileResult(self.root / "cleanup.png", self.root / "cleanup.jpg", 100, None, cleanup_error),
+        )
+        dialog = ReportDialog(BatchReport(files, self.root))
+        self.addCleanup(dialog.close)
+        dialog.table.selectRow(0)
+        dialog.technical_details_button.click()
+        for row in range(1, len(files)):
+            dialog.table.selectRow(row)
+            self.assertEqual(dialog.details.toPlainText(), files[row].error)
+            self.assertTrue(dialog.technical_details_button.isHidden())
+            self.assertFalse(dialog.technical_details_button.isChecked())
+        dialog.table.selectRow(0)
+        self.assertNotIn(known_error, dialog.details.toPlainText())
+        self.assertFalse(dialog.technical_details_button.isChecked())
+        dialog.table.clearSelection()
+        self.assertEqual(dialog.details.toPlainText(), "")
+        self.assertEqual(dialog.details.toolTip(), "")
+        self.assertTrue(dialog.technical_details_button.isHidden())
+
+    def test_technical_details_keep_keyboard_focus_for_repeated_toggles(self):
+        error = "magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956."
+        file = FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, error)
+        dialog = ReportDialog(BatchReport((file,), self.root))
+        self.addCleanup(dialog.close)
+        dialog.show()
+        dialog.table.selectRow(0)
+        button = dialog.technical_details_button
+        button.setFocus()
+        self.app.processEvents()
+        QTest.keyClick(button, Qt.Key.Key_Space)
+        self.assertTrue(button.isChecked())
+        self.assertIs(self.app.focusWidget(), button)
+        self.assertTrue(dialog.details.toPlainText().startswith("Technical details:\n" + error))
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Space)
+        self.assertFalse(button.isChecked())
+        self.assertIs(self.app.focusWidget(), button)
+        self.assertNotIn(error, dialog.details.toPlainText())
 
     def test_video_report_shows_decimal_limit_and_exact_actual_bytes(self):
         good = FileResult(self.root / "one.mov", self.root / "one.mp4", 2_000_000, 995_123, media_type="video", elapsed_seconds=2.0, target_bytes=1_000_000)

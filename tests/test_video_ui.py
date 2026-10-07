@@ -64,6 +64,87 @@ class VideoUiTests(unittest.TestCase):
         self.panel.set_sources([first])
         self.assertEqual(Path(self.panel.output_edit.text()), first.with_name(first.stem + "_optimized.mp4"))
 
+    def test_bad_tilde_output_does_not_break_appending_or_launch(self):
+        first, second = self.video("first.mov"), self.video("second.mov")
+        self.panel.set_sources([first])
+        typed = "~pixelkit_nonexistent_qa_user/out.mp4"
+        self.panel.output_edit.setText(typed)
+        self.panel.add_sources([second])
+        self.assertEqual(self.panel.sources, [first, second])
+        self.assertEqual(self.panel.output_edit.text(), str(Path(typed).parent))
+        with patch("pixelkit.video_panel.VideoWorker") as worker:
+            self.panel.start_processing()
+        worker.assert_not_called()
+        self.assertEqual(self.message.call_args.args[1], "Check output location")
+        self.assertFalse(self.panel.processing)
+
+    def test_existing_folder_cannot_become_a_single_video_output_file(self):
+        self.panel.set_sources([self.video()])
+        folder = self.root / "chosen folder"
+        folder.mkdir()
+        self.panel.output_edit.setText(str(folder))
+        with patch("pixelkit.video_panel.VideoWorker") as worker:
+            self.panel.start_processing()
+        worker.assert_not_called()
+        self.assertEqual(self.message.call_args.args[1], "Check output location")
+        self.assertTrue(folder.is_dir())
+
+    def test_add_videos_and_drop_append_to_the_queue_in_order(self):
+        first, second, third = (self.video(name) for name in ("first.mov", "second.mp4", "third.m4v"))
+        self.panel.set_sources([first])
+        with patch("pixelkit.video_panel.QFileDialog.getOpenFileNames", return_value=([str(first), str(second)], "")):
+            self.panel.add_button.click()
+        self.panel.source_list.files_dropped.emit([second, third, self.root / "missing.mp4"])
+        self.assertEqual(self.panel.sources, [first, second, third])
+        self.assertEqual(self.panel.source_list.count(), 3)
+        self.assertEqual(Path(self.panel.output_edit.text()), self.root / "optimized")
+        self.panel.clear_button.click()
+        self.assertEqual(self.panel.sources, [])
+        self.assertEqual(self.panel.output_edit.text(), "")
+
+    def test_adding_a_folder_keeps_chosen_batch_output_and_last_report(self):
+        first, second = self.video("first.mov"), self.video("second.mp4")
+        third = self.video("incoming/third.mov")
+        self.video("incoming/unsupported.png")
+        self.panel.set_sources([first, second])
+        output = self.root / "chosen output"
+        self.panel.output_edit.setText(str(output))
+        report = BatchReport((), self.root)
+        self.panel.last_report = report
+        self.panel.report_button.show()
+        with patch("pixelkit.video_panel.QFileDialog.getExistingDirectory", return_value=str(third.parent)):
+            self.panel.folder_button.click()
+        self.assertEqual(self.panel.sources, [first, second, third])
+        self.assertEqual(Path(self.panel.output_edit.text()), output)
+        self.assertIs(self.panel.last_report, report)
+        self.assertFalse(self.panel.report_button.isHidden())
+        self.assertTrue(self.panel.report_button.isEnabled())
+
+    def test_adding_a_second_video_uses_parent_of_a_chosen_output_file(self):
+        first, second = self.video("first.mov"), self.video("second.mp4")
+        self.panel.set_sources([first])
+        chosen = self.root / "chosen output" / "share.mp4"
+        self.panel.output_edit.setText(str(chosen))
+        self.panel.add_sources([first])
+        self.assertEqual(Path(self.panel.output_edit.text()), chosen)
+        self.panel.add_sources([second])
+        self.assertEqual(Path(self.panel.output_edit.text()), chosen.parent)
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker) as construct:
+            self.panel.start_processing()
+        self.assertEqual(construct.call_args.args[1], chosen.parent)
+        self.assertTrue(all(output.parent == chosen.parent for _, output in construct.call_args.args[0]))
+        self.assertFalse(chosen.exists())
+
+    def test_append_is_ignored_while_processing(self):
+        first, second = self.video("first.mov"), self.video("second.mp4")
+        self.panel.set_sources([first])
+        output = self.panel.output_edit.text()
+        self.panel._set_busy(True)
+        self.panel.source_list.files_dropped.emit([second])
+        self.assertEqual(self.panel.sources, [first])
+        self.assertEqual(self.panel.output_edit.text(), output)
+
     def test_video_processing_passes_preset_resolution_and_audio_for_each_file(self):
         files = [self.video("first.mov"), self.video("second.mp4")]
         self.panel.set_sources(files)
@@ -82,6 +163,26 @@ class VideoUiTests(unittest.TestCase):
         self.assertIsNone(settings.target_bytes)
         worker.start.assert_called_once()
         self.assertTrue(self.panel.processing)
+
+    def test_encoding_progress_keeps_batch_position_and_cancellation_message(self):
+        files = [self.video("one/clip.mov"), self.video("two/clip.mov"), self.video("last.mp4")]
+        self.panel.set_sources(files)
+        worker = self.mock_worker()
+        with patch("pixelkit.video_panel.VideoWorker", return_value=worker):
+            self.panel.start_processing()
+        self.assertIn("File 1 of 3", self.panel.status.text())
+        self.assertIn("Preparing", self.panel.status.text())
+        self.panel._encoding_progress(0, "clip.mov")
+        self.assertIn("File 1 of 3", self.panel.status.text())
+        self.panel._file_progress(1, 3, "clip.mov")
+        self.panel._encoding_progress(35, "clip.mov")
+        self.assertIn("File 2 of 3", self.panel.status.text())
+        self.assertIn("35%", self.panel.status.text())
+        self.assertEqual(self.panel.progress.value(), 35)
+        self.panel.cancel_processing()
+        self.panel._file_progress(2, 3, "clip.mov")
+        self.panel._encoding_progress(90, "clip.mov")
+        self.assertEqual(self.panel.status.text(), "Cancelling… Completed videos will be kept.")
 
     def test_video_size_limit_defaults_off_and_toggling_preserves_entered_size(self):
         self.assertFalse(self.panel.target_size_check.isChecked())
@@ -273,7 +374,7 @@ class VideoUiTests(unittest.TestCase):
         self.window._set_processing_state(False)
         self.assertTrue(all(button.isEnabled() for button in self.window.mode_buttons))
 
-    def test_open_video_picker_cancel_keeps_queue_and_selected_files_replace_it(self):
+    def test_open_video_picker_cancel_keeps_queue_and_selected_files_extend_it(self):
         source = self.video()
         other = self.video("second.mp4")
         self.panel.set_sources([source])
@@ -282,7 +383,7 @@ class VideoUiTests(unittest.TestCase):
         self.assertEqual(self.panel.sources, [source.resolve()])
         with patch("pixelkit.video_panel.QFileDialog.getOpenFileNames", return_value=([str(other)], "")):
             self.panel.choose_many()
-        self.assertEqual(self.panel.sources, [other.resolve()])
+        self.assertEqual(self.panel.sources, [source.resolve(), other.resolve()])
 
     def test_existing_single_output_requires_confirmation(self):
         source = self.video()
