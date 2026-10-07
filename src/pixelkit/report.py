@@ -5,10 +5,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QUrl
+from PyQt6.QtCore import QIODevice, QSaveFile, Qt, QUrl
 from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QAbstractItemView, QDialog, QHeaderView, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
+from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
 
+from pixelkit import __version__
 from pixelkit.comparison import ComparisonDialog
 
 
@@ -54,6 +55,27 @@ def _result_error_message(file: FileResult) -> str | None:
     if file.media_type == "image" and file.error and file.stopped is None:
         return _image_error_message(file.error)
     return None
+
+
+def error_log(file: FileResult) -> str:
+    """Keep the original error intact, with the context available in the report."""
+    context = [
+        "PixelKit error log",
+        f"Version: {__version__}",
+        f"Media: {file.media_type}",
+        f"Input: {file.source}",
+        f"Output: {file.output}",
+        f"Result: {file.status}",
+    ]
+    if file.before is not None:
+        context.append(f"Input size: {file.before} bytes")
+    if file.elapsed_seconds is not None:
+        context.append(f"Processing time: {file.elapsed_seconds:g} seconds")
+    if file.target_bytes is not None:
+        context.append(f"File-size limit: {file.target_bytes} bytes")
+    if file.quality is not None:
+        context.append(f"Quality used: {file.quality}")
+    return "\n".join(context) + "\n\nError:\n" + (file.error or "")
 
 
 @dataclass(frozen=True)
@@ -183,6 +205,14 @@ class ReportDialog(QDialog):
         self.details.setAccessibleName("Selected file output path or error details")
         self.details.setPlaceholderText("Select a file to see its output path or error details")
         self.details.setFixedHeight(76)
+        self.copy_error_button = QPushButton("Copy error log")
+        self.copy_error_button.setToolTip("Copy the full error and file details to the clipboard")
+        self.copy_error_button.clicked.connect(self._copy_error_log)
+        self.save_error_button = QPushButton("Save error log…")
+        self.save_error_button.setToolTip("Save the full error and file details as a UTF-8 text file")
+        self.save_error_button.clicked.connect(self._save_error_log)
+        self.export_status = QLabel()
+        self.export_status.setAccessibleName("Error log export status")
         self.technical_details_button = QPushButton("Show technical details")
         self.technical_details_button.setCheckable(True)
         self.technical_details_button.setVisible(False)
@@ -190,6 +220,9 @@ class ReportDialog(QDialog):
         self.technical_details_button.toggled.connect(self._update_details)
         self.table.itemSelectionChanged.connect(self._selection_changed)
         details_actions = QHBoxLayout()
+        details_actions.addWidget(self.copy_error_button)
+        details_actions.addWidget(self.save_error_button)
+        details_actions.addWidget(self.export_status)
         details_actions.addStretch()
         details_actions.addWidget(self.technical_details_button)
         layout.addLayout(details_actions)
@@ -210,6 +243,7 @@ class ReportDialog(QDialog):
         close.clicked.connect(self.accept)
         buttons.addWidget(close)
         layout.addLayout(buttons)
+        self._update_details()
         if report.files:
             failed_row = next((row for row, file in enumerate(report.files) if not file.succeeded and file.stopped is None), None)
             row = failed_row if failed_row is not None else next((row for row, file in enumerate(report.files) if not file.succeeded), 0)
@@ -217,11 +251,17 @@ class ReportDialog(QDialog):
             self.table.scrollToItem(self.table.item(row, 0))
 
     def _selection_changed(self) -> None:
+        self.export_status.clear()
+        self.export_status.setToolTip("")
         self.technical_details_button.setChecked(False)
         self._update_details()
 
     def _update_details(self) -> None:
         row = self.table.currentRow() if self.table.selectionModel().hasSelection() else -1
+        can_export = self._selected_failure() is not None
+        for button in (self.copy_error_button, self.save_error_button):
+            button.setVisible(can_export)
+            button.setEnabled(can_export)
         self.compare_button.setEnabled(False)
         if row >= 0:
             file = self.report.files[row]
@@ -242,6 +282,60 @@ class ReportDialog(QDialog):
             self.technical_details_button.setVisible(False)
             self.details.clear()
             self.details.setToolTip("")
+
+    def _selected_failure(self) -> FileResult | None:
+        row = self.table.currentRow()
+        if not self.table.selectionModel().hasSelection() or not 0 <= row < len(self.report.files):
+            return None
+        file = self.report.files[row]
+        return file if file.error and file.stopped is None and not file.succeeded else None
+
+    def _copy_error_log(self) -> None:
+        file = self._selected_failure()
+        if file is None:
+            return
+        QApplication.clipboard().setText(error_log(file))
+        self.export_status.setText("Copied")
+        self.export_status.setToolTip("The full error log is on the clipboard")
+
+    def _save_error_log(self) -> None:
+        file = self._selected_failure()
+        if file is None:
+            return
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save error log", str(self.report.output_dir / f"{file.source.stem}-error.log"),
+            "Log files (*.log);;Text files (*.txt)",
+        )
+        if not filename or self._selected_failure() is not file:
+            return
+        destination = QSaveFile(filename)
+        destination.setDirectWriteFallback(False)
+        try:
+            self._check_log_destination(Path(filename))
+            data = error_log(file).encode("utf-8")
+            if not destination.open(QIODevice.OpenModeFlag.WriteOnly):
+                raise OSError(destination.errorString())
+            if destination.write(data) != len(data):
+                raise OSError(destination.errorString())
+            if not destination.commit():
+                raise OSError(destination.errorString())
+        except (OSError, ValueError, RuntimeError) as exc:
+            destination.cancelWriting()
+            self.export_status.clear()
+            self.export_status.setToolTip("")
+            QMessageBox.warning(self, "Could not save error log", f"Choose another writable log file and try again. Your processing results are kept.\n\n{exc}")
+            return
+        self.export_status.setText("Saved")
+        self.export_status.setToolTip(filename)
+
+    def _check_log_destination(self, destination: Path) -> None:
+        resolved = destination.resolve()
+        for file in self.report.files:
+            for media_path in (file.source, file.output):
+                if str(resolved).casefold() == str(media_path.resolve()).casefold() or (
+                    destination.exists() and media_path.exists() and destination.samefile(media_path)
+                ):
+                    raise ValueError("The error log must use a different path from every input and output file.")
 
     def _compare_images(self) -> None:
         row = self.table.currentRow()

@@ -123,7 +123,7 @@ def probe_video(source: Path, ffprobe: str, cancelled: Callable[[], bool] = lamb
         raise ValueError("Supported video files are MP4, MOV, and M4V.")
     result = _run_captured([ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source.absolute())], cancelled)
     if result.returncode:
-        raise ValueError("Cannot read this video. " + (result.stderr.strip()[-1200:] or "The file may be damaged or unsupported."))
+        raise ValueError("Cannot read this video. " + (result.stderr.strip() or "The file may be damaged or unsupported."))
     try:
         metadata = json.loads(result.stdout)
         streams = metadata["streams"]
@@ -234,8 +234,9 @@ def encode_video(command: list[str], duration: float, cancelled: Callable[[], bo
                 if cancelled():
                     raise ProcessingCancelled()
                 if process.returncode:
-                    errors.seek(0, os.SEEK_END)
-                    errors.seek(max(0, errors.tell() - 3000))
+                    # Retain the first cause as well as the final failure for
+                    # the report's copy/save error-log actions.
+                    errors.seek(0)
                     message = errors.read().decode("utf-8", "replace").strip()
                     raise ValueError("Could not compress this video. " + (message or "FFmpeg returned an unknown error."))
             finally:

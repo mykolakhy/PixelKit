@@ -25,6 +25,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - All processing is performed locally on your computer.
 - Built-in processing presets and your own saved presets, available after restarting the app.
 - Compression report after each batch: before/after sizes, savings, per-file formats and errors, and an output-folder shortcut. Totals include successful files only; larger outputs are shown explicitly.
+- Select a failed image or video in the report, then use **Copy error log** or **Save error log…** to share its full error with PixelKit version and input/output paths. Logs are saved locally as UTF-8 text, including original diagnostics even when the report shows a shorter explanation.
 - Cancel an active batch: stop the current conversion, preserve completed files, and see cancelled/skipped files in the report. Partial output files are removed; existing destinations are replaced only after a conversion succeeds.
 - Limit each output to a requested size for JPG, WEBP or AVIF. Enable **Limit file size**, enter a limit in KiB (1 KiB = 1024 bytes), and select a supported output format. Quality is searched automatically up to the slider's **Max quality**; image dimensions and other settings stay as configured. Unreachable limits are reported without publishing an oversized file. Custom presets retain the limit.
 
