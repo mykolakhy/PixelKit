@@ -151,6 +151,28 @@ class BugReportTests(unittest.TestCase):
             self.assertNotIn(private, result)
         self.assertIn("Permission denied", result)
 
+    def test_file_uri_with_unencoded_spaces_hides_full_path_and_repeated_names(self):
+        cases = (
+            ("Could not open file:///Users/Jane Doe/Secret Folder/video.mov: Permission denied\nvideo.mov belongs to Jane Doe", "Permission denied"),
+            ("Could not open file:///Users/Jane Doe/Secret Folder/video.mov because the video is damaged", "because the video is damaged"),
+            ("Could not open file:///Users/Jane Doe/Secret Folder/video.mov. Decoder returned error code 42", ". Decoder returned error code 42"),
+            ("Could not open file:///Users/Jane%20Doe/Secret%20Folder/video.mov: Permission denied\nvideo.mov belongs to Jane Doe", "Permission denied"),
+        )
+        for error, reason in cases:
+            with self.subTest(error=error):
+                file = self.failure(error, source=Path("/tmp/source.png"), output=Path("/tmp/output.webp"))
+                result = diagnostics(BugReportContext(file=file))
+                for private in ("Jane Doe", "Jane%20Doe", "Secret Folder", "Secret%20Folder", "video.mov"):
+                    self.assertNotIn(private, result)
+                self.assertIn(reason, result)
+
+    def test_file_error_labels_are_not_mistaken_for_file_uris(self):
+        error = "file: unsupported format\nFile: input.png failed\nfile: failed to decode frame 42"
+        result = diagnostics(BugReportContext(file=self.failure(error)))
+        self.assertIn("file: unsupported format", result)
+        self.assertIn("File: [file] failed", result)
+        self.assertIn("file: failed to decode frame 42", result)
+
     def test_converter_source_locations_and_unicode_errors_are_kept_in_full(self):
         error = "magick: no decode delegate @ error/constitute.c/ReadImage/587\n" + ("Дані пошкоджені 🙂 é\n" * 1800)
         result = diagnostics(BugReportContext(file=self.failure(error)))

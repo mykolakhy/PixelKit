@@ -29,7 +29,11 @@ class BugReportContext:
 
 # A slash inside a URL or a converter source-code location is not a local path.
 _PATH_START = r"(?<![\w/\\])(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))"
-_FILE_URI = re.compile(r"\bfile:(?://)?[^\s\"'`<>|;,)]*", re.IGNORECASE)
+_FILE_URI_START = r"\bfile:(?://|/(?!/)|[A-Za-z]:[\\/])"
+_FILE_URI = re.compile(_FILE_URI_START + r"[^\r\n\"'`<>|;]*", re.IGNORECASE)
+_FILE_URI_WITH_SUFFIX = re.compile(
+    _FILE_URI_START + r"[^\r\n\"'`<>|;]*?\.[\w-]{1,16}(?=$|[\s\"'`:,);.])", re.IGNORECASE
+)
 _QUOTED_PATH_WITH_SUFFIX = re.compile(
     r"(?P<quote>[\"'`])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))(?:[^\r\n\"'`]|(?<=\w)'(?=\w))*?\.[\w-]{1,16})(?P=quote)"
 )
@@ -69,11 +73,11 @@ def _path_aliases(path: Path | str, *, include_name: bool = True) -> set[str]:
     return {alias for alias in aliases if alias and alias not in {"/", "\\", ".", "~"}}
 
 
-def _unquoted_path_value(value: str) -> str:
+def _unquoted_path_value(value: str, suffix_pattern: re.Pattern[str] = _PATH_WITH_SUFFIX) -> str:
     """Separate a private path from the converter explanation that follows it."""
     reason = _PATH_REASON.search(value)
     path = value[:reason.start()] if reason else value
-    file_path = _PATH_WITH_SUFFIX.match(path)
+    file_path = suffix_pattern.match(path)
     # A clear file extension ends a path before ordinary diagnostic prose.
     # A slash after it belongs to another directory component (which may itself
     # contain a dot and spaces), so keep that directory path together instead.
@@ -98,8 +102,9 @@ def _sanitize(text: str, paths: tuple[Path, ...]) -> str:
     # Discover names before replacing paths, so repeated basename-only messages
     # cannot reveal a name that was hidden elsewhere in the same error.
     for match in _FILE_URI.finditer(text):
-        aliases.add(match.group())
-        decoded = unquote(match.group())
+        value = _unquoted_path_value(match.group(), _FILE_URI_WITH_SUFFIX)
+        aliases.add(value)
+        decoded = unquote(value)
         aliases.update(_path_aliases(decoded.split(":", 1)[1].lstrip("/")))
         usernames.update(_HOME_USER.findall(decoded.replace("\\", "/")))
     for pattern in (_QUOTED_PATH_WITH_SUFFIX, _QUOTED_PATH, _PATH_WITH_SUFFIX, _UNQUOTED_PATH):
