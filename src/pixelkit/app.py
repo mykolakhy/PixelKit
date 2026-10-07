@@ -36,6 +36,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from pixelkit import __version__
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -354,9 +355,17 @@ class ImageMagickStudio(QMainWindow):
         title_box.setSpacing(2)
         title = QLabel(APP_TITLE)
         title.setObjectName("appTitle")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(title)
+        version = QLabel(f"v{__version__}")
+        version.setObjectName("appVersion")
+        version.setAccessibleName(f"PixelKit version {__version__}")
+        title_row.addWidget(version, alignment=Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch(1)
         subtitle = QLabel("Resize images and compress videos")
         subtitle.setObjectName("appSubtitle")
-        title_box.addWidget(title)
+        title_box.addLayout(title_row)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
@@ -957,6 +966,7 @@ class ImageMagickStudio(QMainWindow):
             QWidget#leftContent, QWidget#rightContent, QScrollArea#leftScroll, QScrollArea#rightScroll {{ background: transparent; border: none; }}
             QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 16px; }}
             QLabel#appTitle {{ color: {c['text']}; font-size: 25px; font-weight: 700; }}
+            QLabel#appVersion {{ color: {c['muted']}; font-size: 12px; font-weight: 400; }}
             QLabel#appSubtitle {{ color: {c['muted']}; font-size: 13px; }}
             QLabel#badge {{ background: #172d2d; color: {c['teal']}; border-radius: 12px; padding: 8px 12px; font-size: 12px; font-weight: 600; }}
             QLabel#sectionTitle {{ color: {c['text']}; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }}
