@@ -119,7 +119,7 @@ class BatchReport:
         return tuple(file for file in self.files if not file.succeeded and file.stopped is None)
 
     def completion_status(self, unit: str = "files") -> str:
-        """Describe the outcome without presenting failed or stopped files as done."""
+        """Count successful processing results without inferring output publication."""
         successful, failed = len(self.successful), len(self.failed)
         if not self.files and not self.cancelled:
             return "No files processed"
@@ -129,7 +129,7 @@ class BatchReport:
             outcome = "Completed" if successful else "Failed"
         else:
             outcome = "Done" if successful == len(self.files) else "Completed"
-        status = f"{outcome}: {successful} / {len(self.files)} {unit} saved"
+        status = f"{outcome}: {successful} / {len(self.files)} {unit} processed successfully"
         return status + (f" · {failed} failed" if failed else "")
 
     @property
@@ -168,9 +168,9 @@ class ReportDialog(QDialog):
             if failed:
                 summary_text += f"  ·  {failed} failed"
         elif report.cancelled:
-            summary_text = "Processing cancelled — no files saved"
+            summary_text = "Processing cancelled"
         elif failed:
-            summary_text = "Processing failed — no files saved"
+            summary_text = "Processing failed"
         else:
             summary_text = "No files processed"
         summary = QLabel(summary_text)

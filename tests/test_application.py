@@ -151,8 +151,8 @@ class ApplicationTests(unittest.TestCase):
         good = FileResult(self.root / "good.png", self.root / "good.webp", 100, 40)
         bad = FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "Could not convert this image")
         cases = (
-            ((bad,), "Failed: 0 / 1 files saved · 1 failed"),
-            ((good, bad), "Completed: 1 / 2 files saved · 1 failed"),
+            ((bad,), "Failed: 0 / 1 files processed successfully · 1 failed"),
+            ((good, bad), "Completed: 1 / 2 files processed successfully · 1 failed"),
         )
         for files, expected in cases:
             with self.subTest(expected=expected), patch("pixelkit.app.ReportDialog") as dialog:
@@ -443,6 +443,55 @@ class ApplicationTests(unittest.TestCase):
                         self.assertTrue(edit.hasAcceptableInput())
         finally:
             QLocale.setDefault(previous_locale)
+
+    def test_locale_digits_and_bidi_signs_launch_with_ascii_dimensions_and_size_limit(self):
+        source = self.root / "original.png"
+        source.write_bytes(b"original")
+        self.window._set_sources([source])
+        self.window.format_combo.setCurrentText("WEBP")
+        self.window.target_size_check.setChecked(True)
+        try:
+            for locale_name in ("ar_EG", "fa_IR", "he_IL", "en_US"):
+                locale = QLocale(locale_name)
+                locale.setNumberOptions(locale.numberOptions() | QLocale.NumberOption.RejectGroupSeparator)
+                for edit, value in ((self.window.width_edit, 123), (self.window.height_edit, 45), (self.window.long_side_edit, 99), (self.window.target_size_edit, 500)):
+                    edit.validator().setLocale(locale)
+                    edit.setText(locale.positiveSign() + locale.toString(value))
+                    self.assertTrue(edit.hasAcceptableInput())
+                for mode, geometry in ((0, "123x45"), (1, "99x99")):
+                    with self.subTest(locale=locale_name, mode=mode):
+                        self.window.resize_mode.setCurrentIndex(mode)
+                        self.window.output_edit.setText(str(self.root / f"{locale_name}-{mode}.webp"))
+                        self.assertTrue(self.window._validate_processing_fields())
+                        with patch("pixelkit.app.BatchWorker") as worker, patch.object(self.window, "_show_message") as message:
+                            self.window._start_processing()
+                        worker.assert_called_once()
+                        jobs, _, target_bytes = worker.call_args.args
+                        command = jobs[0][0]
+                        self.assertEqual(command[command.index("-resize") + 1], geometry)
+                        self.assertEqual(target_bytes, 500 * 1024)
+                        worker.return_value.start.assert_called_once()
+                        message.assert_not_called()
+                        self.assertEqual(source.read_bytes(), b"original")
+                        self.window.worker = None
+                        self.window._set_processing_state(False)
+        finally:
+            self.window.worker = None
+            self.window._set_processing_state(False)
+
+    def test_locale_numbers_save_and_reload_as_normalized_preset_values(self):
+        locale = QLocale("ar_EG")
+        locale.setNumberOptions(locale.numberOptions() | QLocale.NumberOption.RejectGroupSeparator)
+        self.window.format_combo.setCurrentText("WEBP")
+        self.window.target_size_check.setChecked(True)
+        for edit, value in ((self.window.width_edit, 123), (self.window.height_edit, 45), (self.window.target_size_edit, 500)):
+            edit.validator().setLocale(locale)
+            edit.setText(locale.positiveSign() + locale.toString(value))
+        with patch.object(self.window, "_ask_preset_name", return_value="Native digits"), patch.object(self.window, "_show_message") as message:
+            self.window._save_preset()
+        message.assert_not_called()
+        preset = self.preset_store.load()["Native digits"]
+        self.assertEqual((preset.width, preset.height, preset.target_kib), (123, 45, 500))
 
     def test_source_hard_link_alias_is_rejected_before_overwrite_confirmation(self):
         source = self.root / "original.png"

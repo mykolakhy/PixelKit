@@ -108,6 +108,70 @@ class BugReportTests(unittest.TestCase):
                     if meaningful in error:
                         self.assertIn(meaningful, result)
 
+    @unittest.skipIf(os.name == "nt", "The filename uses quote characters allowed on POSIX systems.")
+    def test_real_batch_stat_failure_hides_filename_with_both_quotes(self):
+        from pixelkit.app import BatchWorker
+
+        names = ('''Anna's "Medical diagnosis".png''', '''Family\\Record's "Medical diagnosis".png''')
+        for name in names:
+            with self.subTest(name=name):
+                source = self.root / name
+                output = source.with_suffix(".webp")
+                worker = BatchWorker([(["magick", str(source), str(output)], output)], self.root)
+                reports = []
+                worker.finished.connect(reports.append)
+                # Exercise the actual missing-file stat OSError, before any
+                # converter invocation or temporary output is possible.
+                with patch("pixelkit.app.run_magick") as convert:
+                    worker.run()
+                convert.assert_not_called()
+                self.assertEqual(len(reports), 1)
+                file = reports[0].files[0]
+                self.assertIn("[Errno 2]", file.error)
+                self.assertIn("\\'", file.error)
+                result = diagnostics(BugReportContext(file=file))
+                quote = repr(str(source))[0]
+                expected_error = file.error.replace(repr(str(source)), quote + "[file]" + quote)
+                self.assertEqual(result.partition("Error:\n")[2], expected_error)
+                for private in ("Anna", "Family", "Record", "Medical diagnosis", str(self.root)):
+                    self.assertNotIn(private, result)
+
+    def test_known_names_are_hidden_in_single_double_and_repr_quoted_forms(self):
+        source = self.root / '''Anna's "Medical diagnosis"\\Private record.png'''
+        values = (str(source), source.name)
+        representations = (
+            repr,
+            lambda value: "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'",
+            lambda value: '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"',
+            lambda value: '"' + value.replace("'", "\\'").replace('"', '\\"') + '"',
+        )
+        tail = "Decoder returned error code 42\n" + "Дані пошкоджені 🙂 é\n" * 200
+        for representation in representations:
+            with self.subTest(representation=representation):
+                quoted = tuple(representation(value) for value in values)
+                error = f"Cannot open {quoted[0]}: Permission denied\nInput name: {quoted[1]}\n{tail}"
+                file = self.failure(error, source=source, output=source.with_suffix(".webp"))
+                result = diagnostics(BugReportContext(file=file))
+                expected = error
+                for value in quoted:
+                    expected = expected.replace(value, value[0] + "[file]" + value[-1])
+                self.assertEqual(result.partition("Error:\n")[2], expected)
+
+    def test_unknown_escaped_paths_and_repeated_basenames_are_private(self):
+        cases = (
+            ('''/Users/Jane Doe/Anna's "Medical diagnosis".png''', '''Anna's "Medical diagnosis".png'''),
+            ('''C:\\Users\\Jane Doe\\Anna's "Medical diagnosis".png''', '''Anna's "Medical diagnosis".png'''),
+            ('''\\\\server\\Jane Doe\\Anna's "Medical diagnosis".png''', '''Anna's "Medical diagnosis".png'''),
+        )
+        tail = "Decoder returned error code 42\nДані пошкоджені 🙂 é"
+        for path, name in cases:
+            with self.subTest(path=path):
+                error = f"Could not read {path!r}: Permission denied\nRepeated input: {name}\nQuoted input: {name!r}\n{tail}"
+                result = diagnostics(BugReportContext(file=self.failure(error)))
+                self.assertEqual(result.partition("Error:\n")[2], "Could not read '[file]': Permission denied\nRepeated input: [file]\nQuoted input: '[file]'\n" + tail)
+                for private in ("Jane Doe", "server", "Anna", "Medical diagnosis"):
+                    self.assertNotIn(private, result)
+
     def test_unquoted_directories_and_temporary_paths_with_spaces_are_private(self):
         cases = (
             ("Could not remove temporary files at /Users/Jane Doe/Output Folder/.pixelkit-video-ab12cd3: Permission denied", ("Jane Doe", "Output Folder", ".pixelkit-video-ab12cd3"), "Permission denied"),

@@ -14,6 +14,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtTest import QTest
 from pixelkit.app import BatchWorker
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size, size_change
+from pixelkit.video import VideoInfo, VideoSettings, VideoWorker
 
 
 class ReportTests(unittest.TestCase):
@@ -46,11 +47,11 @@ class ReportTests(unittest.TestCase):
         cancelled = FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled")
         skipped = FileResult(self.root / "skipped.png", self.root / "skipped.webp", 100, None, "Not processed", stopped="Skipped")
         cases = (
-            ((good,), False, "Done: 1 / 1 files saved"),
-            ((bad,), False, "Failed: 0 / 1 files saved · 1 failed"),
-            ((good, bad), False, "Completed: 1 / 2 files saved · 1 failed"),
-            ((good, cancelled, skipped), True, "Cancelled: 1 / 3 files saved"),
-            ((bad, cancelled, skipped), True, "Cancelled: 0 / 3 files saved · 1 failed"),
+            ((good,), False, "Done: 1 / 1 files processed successfully"),
+            ((bad,), False, "Failed: 0 / 1 files processed successfully · 1 failed"),
+            ((good, bad), False, "Completed: 1 / 2 files processed successfully · 1 failed"),
+            ((good, cancelled, skipped), True, "Cancelled: 1 / 3 files processed successfully"),
+            ((bad, cancelled, skipped), True, "Cancelled: 0 / 3 files processed successfully · 1 failed"),
             ((), False, "No files processed"),
         )
         for files, was_cancelled, expected in cases:
@@ -105,8 +106,8 @@ class ReportTests(unittest.TestCase):
         bad = FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, "Video encoding failed", media_type="video")
         cancelled = FileResult(self.root / "cancelled.mov", self.root / "cancelled.mp4", 100, None, "Processing cancelled", stopped="Cancelled", media_type="video")
         cases = (
-            ((bad,), False, "Processing failed — no files saved"),
-            ((cancelled,), True, "Processing cancelled — no files saved"),
+            ((bad,), False, "Processing failed"),
+            ((cancelled,), True, "Processing cancelled"),
             ((), False, "No files processed"),
         )
         for files, was_cancelled, headline in cases:
@@ -114,6 +115,57 @@ class ReportTests(unittest.TestCase):
                 dialog = ReportDialog(BatchReport(files, self.root, cancelled=was_cancelled))
                 self.addCleanup(dialog.close)
                 self.assertEqual(dialog.findChild(QLabel, "reportSummary").text(), headline)
+
+    def test_published_video_cleanup_failure_reports_processing_outcome_and_keeps_diagnostics(self):
+        source = self.root / "original.mov"
+        output = self.root / "compressed.mp4"
+        original = b"original video" * 100
+        compressed = b"compressed video"
+        source.write_bytes(original)
+        worker = VideoWorker([(source, output)], self.root, VideoSettings())
+        reports = []
+        worker.finished.connect(reports.append)
+
+        def encode(command, duration, cancelled, progress):
+            Path(command[-1]).write_bytes(compressed)
+
+        with patch("pixelkit.video.find_ffmpeg", return_value="ffmpeg"), patch("pixelkit.video.find_ffprobe", return_value="ffprobe"), patch("pixelkit.video._run_captured", return_value=subprocess.CompletedProcess([], 0, " V....D libx264 encoder", "")), patch("pixelkit.video.probe_video", return_value=VideoInfo(2, 0, 320, 180, ())), patch("pixelkit.video.encode_video", side_effect=encode), patch("pixelkit.video.shutil.rmtree", side_effect=PermissionError("Permission denied")) as cleanup:
+            worker.run()
+
+        self.assertEqual(len(reports), 1)
+        report = reports[0]
+        file = report.files[0]
+        cleanup.assert_called_once()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(output.read_bytes(), compressed)
+        self.assertEqual(file.after, len(compressed))
+        self.assertFalse(file.succeeded)
+        self.assertEqual(file.status, "Failed")
+        self.assertEqual(report.failed, (file,))
+        self.assertEqual((report.before, report.after), (0, 0))
+        self.assertEqual(report.completion_status("videos"), "Failed: 0 / 1 videos processed successfully · 1 failed")
+        self.assertIn("Compression completed.", file.error)
+        self.assertIn(f"Could not remove temporary files at {cleanup.call_args.args[0]}", file.error)
+        self.assertIn("Permission denied", file.error)
+
+        dialog = ReportDialog(report)
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+        self.assertEqual(dialog.findChild(QLabel, "reportSummary").text(), "Processing failed")
+        self.assertEqual(dialog.table.currentRow(), 0)
+        self.assertEqual(dialog.table.item(0, 0).text(), source.name)
+        self.assertEqual(dialog.table.item(0, 5).text(), "Failed")
+        self.assertEqual(dialog.table.item(0, 5).toolTip(), file.error)
+        self.assertEqual(dialog.details.toPlainText(), file.error)
+        self.assertTrue(dialog.copy_error_button.isEnabled())
+        dialog.copy_error_button.click()
+        self.assertIn(str(output), self.app.clipboard().text())
+        self.assertIn(file.error, self.app.clipboard().text())
+        self.assertTrue(dialog.open_folder.isEnabled())
+        with patch("pixelkit.report.QDesktopServices.openUrl", return_value=True) as open_url:
+            dialog.open_folder.click()
+        self.assertEqual(open_url.call_args.args[0].toLocalFile(), str(self.root.resolve()))
 
     def test_binary_sizes_use_unambiguous_units_in_summary_and_table(self):
         self.assertEqual(human_size(0), "0 B")

@@ -639,8 +639,7 @@ class ImageMagickStudio(QMainWindow):
 
     def _current_preset(self) -> Preset:
         def dimension(edit: QLineEdit) -> int | None:
-            text = edit.text().strip()
-            return int(text) if text else None
+            return self._integer_value(edit) if edit.text().strip() else None
 
         longest_side = self.resize_mode.currentIndex() == 1
         return Preset(
@@ -652,7 +651,7 @@ class ImageMagickStudio(QMainWindow):
             quality=self.quality_slider.value(), strip_metadata=self.strip_metadata.isChecked(),
             background=self.background_edit.text().strip() or "#ffffff",
             output_format=self.format_combo.currentText(),
-            target_kib=int(self.target_size_edit.text()) if self.target_size_check.isChecked() else None,
+            target_kib=self._integer_value(self.target_size_edit) if self.target_size_check.isChecked() else None,
         )
 
     def _ask_preset_name(self, suggested: str) -> str | None:
@@ -961,6 +960,15 @@ class ImageMagickStudio(QMainWindow):
         locale.setNumberOptions(locale.numberOptions() | QLocale.NumberOption.RejectGroupSeparator)
         validator.setLocale(locale)
         return validator
+
+    @staticmethod
+    def _integer_value(edit: QLineEdit) -> int:
+        # QIntValidator accepts native digits and locale-specific signs, which
+        # may include bidi marks that Python's int() cannot parse.
+        value, valid = edit.validator().locale().toInt(edit.text().strip())
+        if not valid:
+            raise ValueError("Enter a valid whole number.")
+        return value
 
     def _field_error_label(self, edit: QLineEdit) -> QLabel:
         label = QLabel()
@@ -1378,13 +1386,13 @@ class ImageMagickStudio(QMainWindow):
         if self.resize_mode.currentIndex() == 1:
             long_side = self.long_side_edit.text().strip()
             if long_side:
-                long_side = str(int(long_side))
+                long_side = str(self._integer_value(self.long_side_edit))
                 command += ["-resize", f"{long_side}x{long_side}"]
         else:
             width = self.width_edit.text().strip()
             height = self.height_edit.text().strip()
-            width = str(int(width)) if width else ""
-            height = str(int(height)) if height else ""
+            width = str(self._integer_value(self.width_edit)) if width else ""
+            height = str(self._integer_value(self.height_edit)) if height else ""
             if width or height:
                 if width and height:
                     resize = f"{width}x{height}" if self.keep_ratio.isChecked() else f"{width}x{height}!"

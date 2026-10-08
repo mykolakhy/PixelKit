@@ -348,8 +348,8 @@ class VideoUiTests(unittest.TestCase):
         good = FileResult(self.root / "good.mov", self.root / "good.mp4", 100, 40, media_type="video")
         bad = FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, "Could not compress this video", media_type="video")
         cases = (
-            ((bad,), "Failed: 0 / 1 videos saved · 1 failed"),
-            ((good, bad), "Completed: 1 / 2 videos saved · 1 failed"),
+            ((bad,), "Failed: 0 / 1 videos processed successfully · 1 failed"),
+            ((good, bad), "Completed: 1 / 2 videos processed successfully · 1 failed"),
         )
         for files, expected in cases:
             with self.subTest(expected=expected), patch("pixelkit.video_panel.ReportDialog") as dialog:

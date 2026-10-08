@@ -34,11 +34,14 @@ _FILE_URI = re.compile(_FILE_URI_START + r"[^\r\n\"'`<>|;]*", re.IGNORECASE)
 _FILE_URI_WITH_SUFFIX = re.compile(
     _FILE_URI_START + r"[^\r\n\"'`<>|;]*?\.[\w-]{1,16}(?=$|[\s\"'`:,);.])", re.IGNORECASE
 )
+# Escaped delimiters belong to a filename, as in Python's OSError repr. The
+# other kind of quote can also occur inside the name without ending it.
+_QUOTED_VALUE = r"(?:\\[^\r\n]|(?!(?P=quote))[^\r\n\\]|(?=(?P=quote))(?<=\w)'(?=\w))*?"
 _QUOTED_PATH_WITH_SUFFIX = re.compile(
-    r"(?P<quote>[\"'`])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))(?:[^\r\n\"'`]|(?<=\w)'(?=\w))*?\.[\w-]{1,16})(?P=quote)"
+    r"(?P<quote>[\"'`])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))" + _QUOTED_VALUE + r"\.[\w-]{1,16})(?P=quote)"
 )
 _QUOTED_PATH = re.compile(
-    r"(?P<quote>[\"'`])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))[^\r\n]*?)(?P=quote)"
+    r"(?P<quote>[\"'`])(?P<path>(?:[A-Za-z]:[\\/]|\\\\|~[\\/]|/(?!/))" + _QUOTED_VALUE + r")(?P=quote)"
 )
 _PATH_WITH_SUFFIX = re.compile(
     _PATH_START + r"[^\r\n\"'`<>|;]*?\.[\w-]{1,16}(?=$|[\s\"'`:,);.])"
@@ -55,7 +58,7 @@ _MEDIA_NAME = re.compile(
     r"(?<![\w/\\])[^\s\"'`<>|:;,/\\]+\." + _MEDIA_SUFFIX + r"(?![\w.])",
     re.IGNORECASE,
 )
-_QUOTED_MEDIA = re.compile(r"(?P<quote>[\"'`])(?P<name>[^\r\n\"'`]*?\." + _MEDIA_SUFFIX + r")(?P=quote)", re.IGNORECASE)
+_QUOTED_MEDIA = re.compile(r"(?P<quote>[\"'`])(?P<name>" + _QUOTED_VALUE + r"\." + _MEDIA_SUFFIX + r")(?P=quote)", re.IGNORECASE)
 _NAMED_MEDIA = re.compile(r"\b(?:file|image|input|output|from)\s+(?P<name>[^\r\n\"'`<>|:;/\\]*?\." + _MEDIA_SUFFIX + r")(?=$|[\s:,);])", re.IGNORECASE)
 _HOME_USER = re.compile(r"/(?:Users|home|Documents and Settings)/([^/:\r\n\"'`]+)", re.IGNORECASE)
 
@@ -64,11 +67,16 @@ def _path_aliases(path: Path | str, *, include_name: bool = True) -> set[str]:
     """Generate spelling variants without resolving or reading the file."""
     value = str(path)
     aliases = {value, value.replace("\\", "/"), value.replace("/", "\\")}
-    aliases.update(alias.replace("\\", "\\\\") for alias in tuple(aliases))
     # PureWindowsPath also understands forward slashes on a non-Windows host.
     if include_name:
         aliases.add(PureWindowsPath(value).name)
         aliases.add(Path(value).name)
+    aliases.update(alias.replace("\\", "\\\\") for alias in tuple(aliases))
+    # Exceptions and converter stderr can quote the same path differently.
+    # Include repr's chosen delimiter and either explicitly escaped delimiter,
+    # after adding basenames so filename-only messages receive the same cover.
+    for alias in tuple(aliases):
+        aliases.update((repr(alias)[1:-1], alias.replace("'", "\\'"), alias.replace('"', '\\"'), alias.replace("'", "\\'").replace('"', '\\"')))
     aliases.update(quote(alias, safe="/:\\") for alias in tuple(aliases))
     return {alias for alias in aliases if alias and alias not in {"/", "\\", ".", "~"}}
 
@@ -112,11 +120,19 @@ def _sanitize(text: str, paths: tuple[Path, ...]) -> str:
             value = match.groupdict().get("path") or match.group()
             if pattern is _UNQUOTED_PATH:
                 value = _unquoted_path_value(value)
-            basename = PureWindowsPath(value).name
-            aliases.update(_path_aliases(value, include_name=bool(re.search(r"\.[\w-]{1,16}$", basename)) or basename.startswith(".pixelkit-")))
-            usernames.update(_HOME_USER.findall(unquote(value).replace("\\", "/")))
+            values = {value}
+            if match.groupdict().get("quote"):
+                values.add(re.sub(r"\\([\\\"'`])", r"\1", value))
+            for value in values:
+                basename = PureWindowsPath(value).name
+                aliases.update(_path_aliases(value, include_name=bool(re.search(r"\.[\w-]{1,16}$", basename)) or basename.startswith(".pixelkit-")))
+                usernames.update(_HOME_USER.findall(unquote(value).replace("\\", "/")))
     for pattern in (_QUOTED_MEDIA, _NAMED_MEDIA):
-        aliases.update(match.group("name") for match in pattern.finditer(text))
+        for match in pattern.finditer(text):
+            name = match.group("name")
+            aliases.add(name)
+            if match.groupdict().get("quote"):
+                aliases.update(_path_aliases(re.sub(r"\\([\\\"'`])", r"\1", name)))
     expressions = [re.escape(alias) for alias in sorted(aliases, key=len, reverse=True)]
     expressions += [r"(?<!\w)" + re.escape(username) + r"(?!\w)" for username in usernames if username]
     if expressions:
