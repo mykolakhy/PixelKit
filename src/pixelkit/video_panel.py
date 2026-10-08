@@ -9,6 +9,7 @@ from PyQt6.QtGui import QDoubleValidator
 from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
 from pixelkit.report import BatchReport, ReportDialog, human_size
+from pixelkit.retry import validate_retry_output
 from pixelkit.video import VIDEO_SUFFIXES, VideoSettings, VideoWorker, find_ffmpeg, find_ffprobe
 from pixelkit.video_presets import VideoPresetStore, video_preset_description, video_preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -233,7 +234,12 @@ class VideoPanel(QWidget):
     def set_sources(self, paths: list[Path]) -> None:
         if self.processing:
             return
-        self.sources = list(dict.fromkeys(path.resolve() for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES))
+        sources = list(dict.fromkeys(path.resolve() for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES))
+        self._replace_sources(sources)
+
+    def _replace_sources(self, sources: list[Path]) -> None:
+        """Populate a validated queue without dropping paths after a file race."""
+        self.sources = list(sources)
         self.source_list.clear()
         self.source_list.placeholder.setVisible(not self.sources)
         for path in self.sources:
@@ -241,7 +247,16 @@ class VideoPanel(QWidget):
             item.setToolTip(str(path))
             self.source_list.addItem(item)
         count = len(self.sources)
-        self.source_info.setText(f'{count} video(s) · {human_size(sum(path.stat().st_size for path in self.sources))}' if count else 'Supports MP4, MOV and M4V')
+        total_size = unavailable = 0
+        for path in self.sources:
+            try:
+                total_size += path.stat().st_size
+            except OSError:
+                unavailable += 1
+        details = f'{count} video(s) · {human_size(total_size)}'
+        if unavailable:
+            details += f' · {unavailable} original(s) unavailable'
+        self.source_info.setText(details if count else 'Supports MP4, MOV and M4V')
         batch = count > 1
         self.output_edit.setPlaceholderText('Output folder' if batch else 'Output file')
         self.output_button.setText('Choose folder…' if batch else 'Choose…')
@@ -334,18 +349,21 @@ class VideoPanel(QWidget):
             return
         preset = self.custom_presets.get(self.saved_preset_combo.currentData())
         if preset is not None:
-            self.applying_preset = True
-            try:
-                self.preset_combo.setCurrentIndex(self.preset_combo.findData(preset.preset))
-                self.resolution_combo.setCurrentIndex(self.resolution_combo.findData(preset.max_height))
-                self.audio_combo.setCurrentIndex(self.audio_combo.findData(preset.audio))
-                self.target_size_check.setChecked(preset.target_bytes is not None)
-                megabytes = Decimal(preset.target_bytes) / 1_000_000 if preset.target_bytes is not None else Decimal(25)
-                self.target_size_edit.setText(format(megabytes, 'f'))
-                self._update_target_controls()
-            finally:
-                self.applying_preset = False
+            self._apply_settings(preset)
         self._update_preset_controls()
+
+    def _apply_settings(self, settings: VideoSettings) -> None:
+        self.applying_preset = True
+        try:
+            self.preset_combo.setCurrentIndex(self.preset_combo.findData(settings.preset))
+            self.resolution_combo.setCurrentIndex(self.resolution_combo.findData(settings.max_height))
+            self.audio_combo.setCurrentIndex(self.audio_combo.findData(settings.audio))
+            self.target_size_check.setChecked(settings.target_bytes is not None)
+            megabytes = Decimal(settings.target_bytes) / 1_000_000 if settings.target_bytes is not None else Decimal(25)
+            self.target_size_edit.setText(format(megabytes, 'f'))
+            self._update_target_controls()
+        finally:
+            self.applying_preset = False
 
     def _current_settings(self) -> VideoSettings:
         target_bytes = None
@@ -585,8 +603,87 @@ class VideoPanel(QWidget):
 
     def show_report(self) -> None:
         if self.last_report is not None and not self.processing:
-            dialog = ReportDialog(self.last_report, self)
-            try:
-                dialog.exec()
-            finally:
-                dialog.deleteLater()
+            self._show_report(self.last_report)
+
+    def _show_report(self, report: BatchReport) -> None:
+        dialog = ReportDialog(report, self)
+        dialog.retry_requested.connect(lambda requested: self._retry_failed(requested, dialog))
+        dialog.set_retry_enabled(not self._retry_busy())
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
+
+    def _retry_busy(self) -> bool:
+        if self.processing or (self.worker is not None and self.worker.isRunning()):
+            return True
+        parent = self.parentWidget()
+        while parent is not None:
+            worker = getattr(parent, 'worker', None)
+            if getattr(parent, 'processing', False) or (worker is not None and worker.isRunning()):
+                return True
+            parent = parent.parentWidget()
+        return False
+
+    def _retry_failed(self, report: BatchReport, dialog: ReportDialog | None = None) -> bool:
+        """Prepare the failed originals with their run settings; encoding is explicit."""
+        if self._retry_busy():
+            self.show_message(QMessageBox.Icon.Information, 'Processing files', 'Wait for the current batch to finish before preparing a retry.')
+            return False
+        failed = report.failed
+        settings = report.retry_settings
+        if not failed or any(file.media_type != 'video' for file in failed) or not isinstance(settings, VideoSettings):
+            return False
+        try:
+            settings = VideoSettings(settings.preset, settings.max_height, settings.audio, settings.target_bytes)
+            sources = list(dict.fromkeys(file.source.resolve() for file in failed))
+            missing = [source for source in sources if not source.is_file()]
+            if missing:
+                self.show_message(QMessageBox.Icon.Warning, 'Original videos not found', 'Restore these original videos before retrying. Your current queue and report are kept.\n\n' + '\n'.join(str(source) for source in missing))
+                return False
+            if any(source.suffix.lower() not in VIDEO_SUFFIXES for source in sources):
+                raise ValueError('The failed originals must be MP4, MOV or M4V videos.')
+            single = len(sources) == 1
+            output = Path(failed[0].output if single else report.output_dir).expanduser()
+            if single and output.suffix.lower() != '.mp4':
+                raise ValueError('The retry output must be an MP4 file.')
+            validate_retry_output(report, output, single=single)
+            report_sources = {file.source.resolve() for file in report.files}
+            needs_confirmation = any(source.resolve() not in report_sources for source in self.sources)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.show_message(QMessageBox.Icon.Warning, 'Could not prepare retry', str(exc))
+            return False
+        if needs_confirmation and not self._confirm('Replace queued videos?', 'Replace the current video queue with the failed originals from this report? Your files will stay on disk.'):
+            return False
+        # Confirmation opens a nested event loop, so check the workers again.
+        if self._retry_busy():
+            return False
+        try:
+            missing = [source for source in sources if not source.is_file()]
+            if missing:
+                self.show_message(QMessageBox.Icon.Warning, 'Original videos not found', 'Restore these original videos before retrying. Your current queue and report are kept.\n\n' + '\n'.join(str(source) for source in missing))
+                return False
+            validate_retry_output(report, output, single=single)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self.show_message(QMessageBox.Icon.Warning, 'Could not prepare retry', str(exc))
+            return False
+        self._replace_sources(sources)
+        self.saved_preset_combo.setCurrentIndex(0)
+        self._apply_settings(settings)
+        self.output_edit.setText(str(output))
+        self.status.setText(f'{len(sources)} failed video(s) ready to retry. Adjust settings, then choose Compress and save.')
+        self._update_state()
+        parent = self.parentWidget()
+        while parent is not None:
+            media_stack = getattr(parent, 'media_stack', None)
+            if media_stack is not None:
+                media_stack.setCurrentIndex(1)
+                for index, button in enumerate(getattr(parent, 'mode_buttons', ())):
+                    button.setChecked(index == 1)
+                break
+            parent = parent.parentWidget()
+        if dialog is not None:
+            dialog.accept()
+        self.source_list.setCurrentRow(0)
+        self.source_list.setFocus()
+        return True
