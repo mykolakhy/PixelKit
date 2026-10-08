@@ -7,12 +7,13 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QEvent, QSettings, QTimer, Qt
+from PyQt6.QtCore import QEvent, QEventLoop, QPoint, QSettings, QTimer, Qt
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
-from PyQt6.QtWidgets import QDialog
+from PyQt6.QtWidgets import QDialog, QPushButton
 
 from pixelkit.app import ONBOARDING_SETTINGS_KEY, SUPPORTED_SUFFIXES, ImageMagickStudio, PixelKitApplication, main
-from pixelkit.onboarding import OnboardingDialog
+from pixelkit.onboarding import OnboardingPage
 from pixelkit.presets import Preset, PresetStore
 from pixelkit.report import BatchReport
 from pixelkit.video import VIDEO_SUFFIXES, VideoSettings
@@ -64,60 +65,48 @@ class OnboardingIntegrationTests(unittest.TestCase):
         window = window or self.window
         return window.preset_store.settings.value(ONBOARDING_SETTINGS_KEY, False, type=bool)
 
-    def run_dialog(self, callback, *, window=None, replay=False):
-        """Drive the real modal loop; keep assertion failures outside Qt callbacks."""
+    def show_page(self, *, window=None, replay=False):
         window = window or self.window
         window.show()
         window.activateWindow()
         self.app.processEvents()
-        errors, dialogs = [], []
+        if replay:
+            window.getting_started_action.trigger()
+        else:
+            window._maybe_show_onboarding()
+        self.app.processEvents()
+        page = window._onboarding_page
+        self.assertIsInstance(page, OnboardingPage)
+        self.assertIs(window.content_stack.currentWidget(), page)
+        self.assertFalse(window.workspace_page.isVisible())
+        self.assertFalse(window.workspace_page.isEnabled())
+        self.assertTrue(page.isVisible())
+        self.assertFalse(page.isWindow())
+        self.assertIsNone(self.app.activeModalWidget())
+        return page
 
-        def interact():
-            dialog = window._onboarding_dialog
-            if dialog is None:
-                errors.append(AssertionError("Getting started did not open"))
-                return
-            dialogs.append(dialog)
-            try:
-                callback(dialog)
-            except BaseException as error:
-                errors.append(error)
-                dialog.reject()
-
-        watchdog = QTimer(window)
-        watchdog.setSingleShot(True)
-
-        def reject_unfinished():
-            dialog = window._onboarding_dialog
-            if dialog is not None:
-                errors.append(AssertionError("Getting started did not finish"))
-                dialog.reject()
-
-        watchdog.timeout.connect(reject_unfinished)
-        watchdog.start(2000)
-        QTimer.singleShot(0, interact)
-        try:
-            if replay:
-                window.getting_started_action.trigger()
-            else:
-                window._maybe_show_onboarding()
-        finally:
-            watchdog.stop()
-        self.assertTrue(dialogs, "The dialog was suppressed unexpectedly")
-        if errors:
-            raise errors[0]
-        self.assertIsNone(window._onboarding_dialog)
-        return dialogs[0]
+    def run_page(self, callback, *, window=None, replay=False):
+        window = window or self.window
+        page = self.show_page(window=window, replay=replay)
+        finished = []
+        page.finished.connect(finished.append)
+        callback(page)
+        self.app.processEvents()
+        self.assertIsNone(window._onboarding_page)
+        self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
+        self.assertTrue(window.workspace_page.isEnabled())
+        self.assertEqual(window.content_stack.count(), 1)
+        return finished
 
     @staticmethod
-    def skip(dialog):
-        QTest.mouseClick(dialog.skip_button, Qt.MouseButton.LeftButton)
+    def skip(page):
+        QTest.mouseClick(page.skip_button, Qt.MouseButton.LeftButton)
 
-    def complete(self, dialog):
-        self.assertEqual(dialog.page_stack.currentIndex(), 0)
-        QTest.mouseClick(dialog.next_button, Qt.MouseButton.LeftButton)
-        self.assertEqual(dialog.page_stack.currentIndex(), 1)
-        QTest.mouseClick(dialog.next_button, Qt.MouseButton.LeftButton)
+    def complete(self, page):
+        self.assertEqual(page.page_stack.currentIndex(), 0)
+        QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+        self.assertEqual(page.page_stack.currentIndex(), 1)
+        QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
 
     def test_skip_persists_across_windows_and_preserves_image_and_video_presets(self):
         image = Preset(quality=63, output_format="WEBP")
@@ -127,8 +116,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
         raw_image = self.store.settings.value(PresetStore.KEY)
         raw_video = self.store.settings.value(VideoPresetStore.KEY)
         self.store.settings.setValue("unrelated/preference", "keep me")
-        dialog = self.run_dialog(self.skip)
-        self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+        self.assertEqual(self.run_page(self.skip), [False])
         self.assertTrue(self.dismissed())
         self.assertTrue(self.window._onboarding_seen_session)
         self.assertEqual(self.store.settings.value(PresetStore.KEY), raw_image)
@@ -136,51 +124,270 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.assertEqual(self.store.settings.value("unrelated/preference"), "keep me")
         reopened = self.make_window()
         reopened.show()
-        with patch.object(OnboardingDialog, "exec") as execute:
-            reopened._maybe_show_onboarding()
-        execute.assert_not_called()
+        reopened._maybe_show_onboarding()
+        self.assertIsNone(reopened._onboarding_page)
         self.assertEqual(reopened.custom_presets, {"My image preset": image})
         self.assertEqual(reopened.video_panel.custom_presets, {"My video preset": video})
 
-    def test_escape_and_title_bar_close_are_saved_dismissals(self):
-        for index, callback in enumerate((lambda dialog: QTest.keyClick(dialog, Qt.Key.Key_Escape), lambda dialog: dialog.close())):
+    def test_escape_from_page_or_focused_button_is_a_saved_dismissal(self):
+        for index, callback in enumerate((lambda page: QTest.keyClick(page, Qt.Key.Key_Escape), lambda page: QTest.keyClick(page.next_button, Qt.Key.Key_Escape))):
             with self.subTest(index=index):
                 store = PresetStore(QSettings(str(self.root / f"dismissal-{index}.ini"), QSettings.Format.IniFormat))
                 window = self.make_window(store)
                 with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
-                    dialog = self.run_dialog(callback, window=window)
-                self.assertFalse(dialog.add_file_requested)
+                    finished = self.run_page(callback, window=window)
+                self.assertEqual(finished, [False])
                 chooser.assert_not_called()
                 self.assertTrue(self.dismissed(window))
 
     def test_help_replays_after_dismissal_and_restarts_on_first_page(self):
-        self.run_dialog(self.skip)
+        self.run_page(self.skip)
 
-        def navigate_and_skip(dialog):
-            self.assertEqual(dialog.page_stack.currentIndex(), 0)
-            QTest.mouseClick(dialog.next_button, Qt.MouseButton.LeftButton)
-            QTest.mouseClick(dialog.back_button, Qt.MouseButton.LeftButton)
-            self.assertEqual(dialog.page_stack.currentIndex(), 0)
-            self.skip(dialog)
+        def navigate_and_skip(page):
+            self.assertEqual(page.page_stack.currentIndex(), 0)
+            QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+            QTest.mouseClick(page.back_button, Qt.MouseButton.LeftButton)
+            self.assertEqual(page.page_stack.currentIndex(), 0)
+            self.skip(page)
 
-        self.run_dialog(navigate_and_skip, replay=True)
-        with patch.object(OnboardingDialog, "exec") as execute:
-            self.window._maybe_show_onboarding()
-        execute.assert_not_called()
+        self.run_page(navigate_and_skip, replay=True)
+        self.window._maybe_show_onboarding()
+        self.assertIsNone(self.window._onboarding_page)
         self.assertTrue(self.dismissed())
+
+    def test_guide_fills_resized_central_area_without_another_window_or_title_change(self):
+        self.window.show()
+        self.window.activateWindow()
+        self.app.processEvents()
+        title = self.window.windowTitle()
+        geometry = self.window.geometry()
+        visible_windows = {widget for widget in self.app.topLevelWidgets() if widget.isVisible()}
+        page = self.show_page()
+        self.assertIs(self.window.centralWidget(), self.window.content_stack)
+        self.assertEqual(self.window.windowTitle(), title)
+        self.assertEqual(self.window.geometry(), geometry)
+        self.assertEqual({widget for widget in self.app.topLevelWidgets() if widget.isVisible()}, visible_windows)
+        for width, height in ((1040, 620), (1300, 850)):
+            with self.subTest(size=(width, height)):
+                self.window.resize(width, height)
+                self.app.processEvents()
+                self.assertEqual(page.geometry(), self.window.content_stack.contentsRect())
+                self.assertEqual(page.mapTo(self.window, QPoint(0, 0)), self.window.content_stack.pos())
+                self.assertEqual(self.window.windowTitle(), title)
+                for button in (page.next_button, page.skip_button):
+                    self.assertFalse(button.visibleRegion().isEmpty())
+                    self.assertTrue(page.rect().contains(button.mapTo(page, QPoint(0, 0))))
+                    self.assertTrue(page.rect().contains(button.mapTo(page, QPoint(button.width() - 1, button.height() - 1))))
+        geometry = self.window.geometry()
+        self.skip(page)
+        self.app.processEvents()
+        self.assertIsNone(self.window._onboarding_page)
+        self.assertIs(self.window.content_stack.currentWidget(), self.window.workspace_page)
+        self.assertEqual(self.window.workspace_page.geometry(), self.window.content_stack.contentsRect())
+        self.assertEqual(self.window.geometry(), geometry)
+        self.assertEqual(self.window.windowTitle(), title)
+
+    def test_repeated_help_and_startup_callbacks_keep_one_active_guide(self):
+        page = self.show_page()
+        QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+        for _ in range(3):
+            self.window._maybe_show_onboarding()
+            self.window.getting_started_action.trigger()
+            self.app.processEvents()
+            self.assertIs(self.window._onboarding_page, page)
+            self.assertEqual(self.window.content_stack.count(), 2)
+            self.assertEqual(page.page_stack.currentIndex(), 1)
+            self.assertFalse(self.dismissed())
+        self.skip(page)
+        self.app.processEvents()
+        self.assertIsNone(self.window._onboarding_page)
+        self.assertEqual(self.window.content_stack.count(), 1)
+
+    def test_old_guide_signals_cannot_finish_a_new_help_replay(self):
+        old_page = self.show_page()
+        self.window.open_files([self.source("Finder interrupt.png")])
+        self.window._show_onboarding()
+        new_page = self.window._onboarding_page
+        self.assertIsNotNone(new_page)
+        self.assertIsNot(new_page, old_page)
+        with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
+            old_page.finished.emit(True)
+            old_page.finished.emit(False)
+        chooser.assert_not_called()
+        self.assertIs(self.window._onboarding_page, new_page)
+        self.assertIs(self.window.content_stack.currentWidget(), new_page)
+        self.assertEqual(self.window.content_stack.count(), 2)
+        self.assertFalse(self.dismissed())
+        self.skip(new_page)
+        self.app.processEvents()
+        self.assertIsNone(self.window._onboarding_page)
+        self.assertTrue(self.dismissed())
+
+    def test_hidden_workspace_open_and_processing_actions_cannot_run_during_guide(self):
+        with patch("pixelkit.app.sys.platform", "darwin"):
+            window = self.make_window()
+        window._set_sources([self.source("ready.png")])
+        window.video_panel.set_sources([self.source("ready.mov")])
+        page = self.show_page(window=window, replay=True)
+        self.assertFalse(window.open_action.isEnabled())
+        self.assertFalse(window.save_action.isEnabled())
+        with patch.object(window, "_start_processing") as process_images, patch.object(window.video_panel, "start_processing") as process_video, patch.object(window, "_choose_many") as open_images, patch.object(window.video_panel, "choose_many") as open_video:
+            for mode in (0, 1):
+                window.media_stack.setCurrentIndex(mode)
+                window._open_current_mode()
+                window._process_current_mode()
+                window.open_action.trigger()
+                window.save_action.trigger()
+                QTest.keySequence(page.next_button, QKeySequence(QKeySequence.StandardKey.Open))
+                QTest.keySequence(page.next_button, QKeySequence(QKeySequence.StandardKey.Save))
+                self.app.processEvents()
+                self.assertIs(window._onboarding_page, page)
+            process_images.assert_not_called()
+            process_video.assert_not_called()
+            open_images.assert_not_called()
+            open_video.assert_not_called()
+        self.assertIsNone(window.worker)
+        self.assertIsNone(window.video_panel.worker)
+        self.skip(page)
+        self.app.processEvents()
+        self.assertTrue(window.open_action.isEnabled())
+        self.assertTrue(window.save_action.isEnabled())
+
+    def test_hidden_workspace_buttons_are_disabled_and_restore_original_states(self):
+        image, video = self.source("image ready.png"), self.source("video ready.mov")
+        self.window._set_sources([image])
+        panel = self.window.video_panel
+        panel.set_sources([video])
+        self.window.width_edit.setEnabled(False)
+        controls = (self.window.process_button, panel.process_button, self.window.width_edit, panel.target_size_edit, self.window.report_button)
+        original_enabled = tuple(control.isEnabled() for control in controls)
+        self.assertEqual(original_enabled, (True, True, False, False, False))
+        image_add_buttons = [button for button in self.window.source_card.findChildren(QPushButton) if button.text() in ("One file", "Add images…", "Folder")]
+        self.assertEqual(len(image_add_buttons), 3)
+        buttons = [self.window.process_button, panel.process_button, *image_add_buttons, panel.add_button, panel.folder_button]
+        page = self.show_page(replay=True)
+        with patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker, patch("pixelkit.app.QFileDialog.getOpenFileName") as choose_one, patch("pixelkit.app.QFileDialog.getOpenFileNames") as choose_many, patch("pixelkit.app.QFileDialog.getExistingDirectory") as choose_folder:
+            for button in buttons:
+                self.assertFalse(button.isEnabled())
+                button.click()
+            self.app.processEvents()
+            image_worker.assert_not_called()
+            video_worker.assert_not_called()
+            choose_one.assert_not_called()
+            choose_many.assert_not_called()
+            choose_folder.assert_not_called()
+        self.assertEqual(self.window.sources, [image])
+        self.assertEqual(panel.sources, [video])
+        self.assertIsNone(self.window.worker)
+        self.assertIsNone(panel.worker)
+        self.skip(page)
+        self.app.processEvents()
+        self.assertTrue(self.window.workspace_page.isEnabled())
+        self.assertEqual(tuple(control.isEnabled() for control in controls), original_enabled)
+        self.assertTrue(all(button.isEnabled() for button in buttons))
 
     def test_cancelled_final_chooser_keeps_empty_queues_and_dismissal(self):
         with patch("pixelkit.app.QFileDialog.getOpenFileName", return_value=("", "")) as chooser, patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            dialog = self.run_dialog(self.complete)
+            finished = self.run_page(self.complete)
         chooser.assert_called_once()
-        self.assertTrue(dialog.add_file_requested)
-        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertEqual(finished, [True])
         self.assertTrue(self.dismissed())
         self.assertEqual(self.window.sources, [])
         self.assertEqual(self.window.video_panel.sources, [])
         image_worker.assert_not_called()
         video_worker.assert_not_called()
         self.assertFalse((self.root / "optimized").exists())
+
+    def test_native_picker_blocks_reentry_and_restores_actions_after_choice_or_cancel(self):
+        for select_file in (True, False):
+            with self.subTest(select_file=select_file):
+                with patch("pixelkit.app.sys.platform", "darwin"):
+                    window = self.make_window()
+                image = self.source(f"existing-{select_file}.png")
+                video = self.source(f"existing-{select_file}.mov")
+                selected = self.source(f"selected-{select_file}.png")
+                window._set_sources([image])
+                window.video_panel.set_sources([video])
+                window.show()
+                window.activateWindow()
+                self.app.processEvents()
+                errors, picker_calls = [], []
+
+                def choose(*args):
+                    picker_calls.append(args)
+                    if len(picker_calls) > 1:
+                        errors.append(AssertionError("A second onboarding file picker opened"))
+                        return "", ""
+                    loop = QEventLoop()
+
+                    def attempt_reentry():
+                        try:
+                            self.assertTrue(window._onboarding_file_picker_open)
+                            self.assertFalse(window.getting_started_action.isEnabled())
+                            self.assertFalse(window.open_action.isEnabled())
+                            self.assertFalse(window.save_action.isEnabled())
+                            window.getting_started_action.trigger()
+                            window._show_onboarding()
+                            window._choose_onboarding_file()
+                            for mode in (0, 1):
+                                window.media_stack.setCurrentIndex(mode)
+                                window.open_action.trigger()
+                                window.save_action.trigger()
+                                window._open_current_mode()
+                                window._process_current_mode()
+                            self.assertIsNone(window._onboarding_page)
+                            self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
+                            self.assertEqual(window.content_stack.count(), 1)
+                        except BaseException as error:
+                            errors.append(error)
+                        finally:
+                            loop.quit()
+
+                    QTimer.singleShot(0, attempt_reentry)
+                    loop.exec()
+                    return (str(selected), "") if select_file else ("", "")
+
+                with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose) as picker, patch("pixelkit.app.QFileDialog.getOpenFileNames", return_value=([], "")) as other_picker, patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
+                    window._choose_onboarding_file()
+                if errors:
+                    raise errors[0]
+                picker.assert_called_once()
+                other_picker.assert_not_called()
+                image_worker.assert_not_called()
+                video_worker.assert_not_called()
+                self.assertFalse(window._onboarding_file_picker_open)
+                self.assertTrue(window.getting_started_action.isEnabled())
+                self.assertTrue(window.open_action.isEnabled())
+                self.assertTrue(window.save_action.isEnabled())
+                self.assertIsNone(window._onboarding_page)
+                self.assertEqual(window.sources, [image, selected] if select_file else [image])
+                self.assertEqual(window.video_panel.sources, [video])
+                self.assertIsNone(window.worker)
+                self.assertIsNone(window.video_panel.worker)
+
+    def test_picker_exception_clears_busy_flag_and_restores_actions_and_queue(self):
+        with patch("pixelkit.app.sys.platform", "darwin"):
+            window = self.make_window()
+        image = self.source("before picker exception.png")
+        window._set_sources([image])
+
+        def fail(*args):
+            self.assertTrue(window._onboarding_file_picker_open)
+            self.assertFalse(window.getting_started_action.isEnabled())
+            self.assertFalse(window.open_action.isEnabled())
+            self.assertFalse(window.save_action.isEnabled())
+            raise RuntimeError("Picker failed")
+
+        with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=fail):
+            with self.assertRaisesRegex(RuntimeError, "Picker failed"):
+                window._choose_onboarding_file()
+        self.assertFalse(window._onboarding_file_picker_open)
+        self.assertTrue(window.getting_started_action.isEnabled())
+        self.assertTrue(window.open_action.isEnabled())
+        self.assertTrue(window.save_action.isEnabled())
+        self.assertEqual(window.sources, [image])
+        self.assertIsNone(window._onboarding_page)
+        self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
 
     def test_final_image_and_video_choices_route_without_processing_or_media_writes(self):
         for index, suffix in enumerate((".HEIF", ".MOV")):
@@ -190,14 +397,15 @@ class OnboardingIntegrationTests(unittest.TestCase):
                 window = self.make_window(PresetStore(QSettings(str(self.root / f"routing-{index}.ini"), QSettings.Format.IniFormat)))
 
                 def choose(*args):
-                    self.assertIsNone(window._onboarding_dialog)
+                    self.assertIsNone(window._onboarding_page)
+                    self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
                     self.assertIsNone(self.app.activeModalWidget())
                     for supported in SUPPORTED_SUFFIXES | VIDEO_SUFFIXES:
                         self.assertIn(f"*{supported}", args[3])
                     return str(source), ""
 
                 with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-                    self.run_dialog(self.complete, window=window)
+                    self.run_page(self.complete, window=window)
                 self.app.processEvents()
                 is_video = suffix.lower() in VIDEO_SUFFIXES
                 self.assertEqual(window.sources, [] if is_video else [source])
@@ -232,8 +440,8 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.window.last_report, panel.last_report = image_report, video_report
         self.store.settings.setValue(ONBOARDING_SETTINGS_KEY, True)
         with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=[(str(images[2]), ""), (str(videos[2]), "")]), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            self.run_dialog(self.complete, replay=True)
-            self.run_dialog(self.complete, replay=True)
+            self.run_page(self.complete, replay=True)
+            self.run_page(self.complete, replay=True)
         self.assertEqual(self.window.sources, images)
         self.assertEqual(panel.sources, videos)
         self.assertEqual(self.window.output_edit.text(), str(image_output))
@@ -258,9 +466,9 @@ class OnboardingIntegrationTests(unittest.TestCase):
         settings = self.window._current_preset(), self.window.video_panel._current_settings()
         reports = BatchReport((), self.root), BatchReport((), self.root)
         self.window.last_report, self.window.video_panel.last_report = reports
-        self.run_dialog(self.skip, replay=True)
+        self.run_page(self.skip, replay=True)
         with patch("pixelkit.app.QFileDialog.getOpenFileName", return_value=("", "")):
-            self.run_dialog(self.complete, replay=True)
+            self.run_page(self.complete, replay=True)
         self.assertEqual(self.window.sources, [image])
         self.assertEqual(self.window.video_panel.sources, [video])
         self.assertEqual(self.window.media_stack.currentIndex(), 1)
@@ -274,9 +482,8 @@ class OnboardingIntegrationTests(unittest.TestCase):
             with self.subTest(suffix=suffix):
                 window = self.make_window()
                 window.open_files([self.source(f"startup{suffix}")])
-                with patch.object(OnboardingDialog, "exec") as execute:
-                    window._maybe_show_onboarding()
-                execute.assert_not_called()
+                window._maybe_show_onboarding()
+                self.assertIsNone(window._onboarding_page)
                 self.assertFalse(self.dismissed(window))
                 self.assertFalse(window._onboarding_seen_session)
 
@@ -290,11 +497,10 @@ class OnboardingIntegrationTests(unittest.TestCase):
         event.file.return_value = str(source)
         self.app.files_opened.connect(self.window.open_files)
         try:
-            with patch.object(OnboardingDialog, "exec") as execute:
-                self.app.event(event)
-                QTimer.singleShot(0, self.window._maybe_show_onboarding)
-                self.app.processEvents()
-            execute.assert_not_called()
+            self.app.event(event)
+            QTimer.singleShot(0, self.window._maybe_show_onboarding)
+            self.app.processEvents()
+            self.assertIsNone(self.window._onboarding_page)
             self.assertEqual(self.window.sources, [source])
             self.assertFalse(self.dismissed())
         finally:
@@ -314,10 +520,9 @@ class OnboardingIntegrationTests(unittest.TestCase):
                 main()
             exit_app.assert_called_once_with(0)
             self.assertEqual(callbacks, [(0, self.app.dispatch_open_files), (0, startup._maybe_show_onboarding)])
-            with patch.object(OnboardingDialog, "exec") as execute:
-                for _, callback in callbacks:
-                    callback()
-            execute.assert_not_called()
+            for _, callback in callbacks:
+                callback()
+            self.assertIsNone(startup._onboarding_page)
             self.assertEqual(startup.sources, [finder, cli])
             self.assertFalse(self.dismissed(startup))
         finally:
@@ -334,10 +539,9 @@ class OnboardingIntegrationTests(unittest.TestCase):
                     else:
                         owner.worker = Mock()
                         owner.worker.isRunning.return_value = True
-                    with patch.object(OnboardingDialog, "exec") as execute:
-                        self.window._maybe_show_onboarding()
-                        self.window.getting_started_action.trigger()
-                    execute.assert_not_called()
+                    self.window._maybe_show_onboarding()
+                    self.window.getting_started_action.trigger()
+                    self.assertIsNone(self.window._onboarding_page)
                     self.assertFalse(self.dismissed())
                     owner.processing = False
                     owner.worker = None
@@ -370,7 +574,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
             return str(selected), ""
 
         with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            self.run_dialog(self.complete)
+            self.run_page(self.complete)
         self.assertEqual(self.window.sources, [incoming, selected])
         self.assertEqual(self.window.video_panel.sources, [])
         self.assertTrue(self.dismissed())
@@ -405,12 +609,13 @@ class OnboardingIntegrationTests(unittest.TestCase):
                 source = self.source(f"incoming{suffix}")
                 window = self.make_window(PresetStore(QSettings(str(self.root / f"incoming-{index}.ini"), QSettings.Format.IniFormat)))
 
-                def incoming(dialog):
+                def incoming(page):
                     window.open_files([source, self.root / "missing.png"])
-                    self.assertEqual(dialog.result(), QDialog.DialogCode.Rejected)
+                    self.assertIsNone(window._onboarding_page)
+                    self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
 
                 with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
-                    self.run_dialog(incoming, window=window)
+                    self.run_page(incoming, window=window)
                 is_video = suffix.lower() in VIDEO_SUFFIXES
                 self.assertEqual(window.sources, [] if is_video else [source])
                 self.assertEqual(window.video_panel.sources, [source] if is_video else [])
@@ -418,30 +623,29 @@ class OnboardingIntegrationTests(unittest.TestCase):
                 self.assertFalse(self.dismissed(window))
                 self.assertFalse(window._onboarding_seen_session)
                 chooser.assert_not_called()
-                with patch.object(OnboardingDialog, "exec") as execute:
-                    window._maybe_show_onboarding()
-                execute.assert_not_called()
+                window._maybe_show_onboarding()
+                self.assertIsNone(window._onboarding_page)
 
-    def test_invalid_and_mixed_finder_input_does_not_interrupt_dialog(self):
+    def test_invalid_and_mixed_finder_input_does_not_interrupt_page(self):
         image, video, unsupported = self.source("incoming.png"), self.source("incoming.mov"), self.source("notes.txt")
 
-        def incoming(dialog):
+        def incoming(page):
             for paths in ([unsupported, self.root / "missing.png"], [image, video]):
                 self.window.open_files(paths)
-                self.assertIs(self.window._onboarding_dialog, dialog)
-                self.assertTrue(dialog.isVisible())
-                self.assertFalse(self.window._onboarding_interrupted)
+                self.assertIs(self.window._onboarding_page, page)
+                self.assertTrue(page.isVisible())
+                self.assertFalse(self.window._onboarding_seen_session)
                 self.assertEqual(self.window.sources, [])
                 self.assertEqual(self.window.video_panel.sources, [])
-            self.skip(dialog)
+            self.skip(page)
 
-        self.run_dialog(incoming)
+        self.run_page(incoming)
         self.assertTrue(self.dismissed())
         self.message.assert_called_once()
 
     def test_parent_close_interrupts_without_persisting_or_opening_chooser(self):
         with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
-            self.run_dialog(lambda dialog: self.window.close())
+            self.run_page(lambda page: self.window.close())
         self.assertFalse(self.dismissed())
         self.assertFalse(self.window._onboarding_seen_session)
         self.assertFalse(self.window.isVisible())
@@ -466,58 +670,32 @@ class OnboardingIntegrationTests(unittest.TestCase):
         warning.setModal(True)
         warning.show()
         self.app.processEvents()
-        errors, opened = [], []
-        watchdog = QTimer(self.window)
-        watchdog.setSingleShot(True)
-
-        def dismiss_onboarding():
-            dialog = self.window._onboarding_dialog
-            if dialog is None:
-                errors.append(AssertionError("Deferred getting started did not open"))
-            else:
-                opened.append(dialog)
-                try:
-                    self.skip(dialog)
-                except BaseException as error:
-                    errors.append(error)
-                    dialog.reject()
-
-        def reject_unfinished():
-            dialog = self.window._onboarding_dialog
-            if dialog is not None:
-                errors.append(AssertionError("Deferred getting started did not finish"))
-                dialog.reject()
-
-        watchdog.timeout.connect(reject_unfinished)
-        watchdog.start(2000)
-
         try:
-            with patch.object(OnboardingDialog, "exec") as execute:
-                self.window._maybe_show_onboarding()
-            execute.assert_not_called()
+            self.window._maybe_show_onboarding()
+            self.assertIsNone(self.window._onboarding_page)
             self.assertFalse(self.dismissed())
             QTimer.singleShot(10, warning.reject)
-            QTimer.singleShot(200, dismiss_onboarding)
-            QTest.qWait(300)
+            QTest.qWait(220)
+            page = self.window._onboarding_page
+            self.assertIsInstance(page, OnboardingPage)
+            self.assertIs(self.window.content_stack.currentWidget(), page)
+            self.skip(page)
+            self.app.processEvents()
         finally:
-            watchdog.stop()
             warning.close()
-        if errors:
-            raise errors[0]
-        self.assertEqual(len(opened), 1)
+        self.assertIsNone(self.window._onboarding_page)
         self.assertTrue(self.dismissed())
 
     def test_unwritable_preferences_dismiss_for_session_without_blocking_user(self):
         blocker = self.source("not-a-folder")
         settings = QSettings(str(blocker / "preferences.ini"), QSettings.Format.IniFormat)
         window = self.make_window(PresetStore(settings))
-        self.run_dialog(self.skip, window=window)
+        self.run_page(self.skip, window=window)
         self.assertTrue(window._onboarding_seen_session)
         self.assertIn("could not be saved", window.status_label.full_text)
         self.assertEqual(blocker.read_bytes(), b"original media fixture")
-        with patch.object(OnboardingDialog, "exec") as execute:
-            window._maybe_show_onboarding()
-        execute.assert_not_called()
+        window._maybe_show_onboarding()
+        self.assertIsNone(window._onboarding_page)
         self.message.assert_not_called()
 
 

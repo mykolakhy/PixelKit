@@ -40,7 +40,7 @@ from PyQt6.QtWidgets import (
 from pixelkit import __version__
 from pixelkit.bug_report import BugReportContext
 from pixelkit.bug_report_dialog import BugReportDialog
-from pixelkit.onboarding import OnboardingDialog
+from pixelkit.onboarding import OnboardingPage
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -282,9 +282,9 @@ class ImageMagickStudio(QMainWindow):
         self.worker: BatchWorker | None = None
         self.last_report: BatchReport | None = None
         self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
-        self._onboarding_dialog: OnboardingDialog | None = None
+        self._onboarding_page: OnboardingPage | None = None
         self._onboarding_seen_session = False
-        self._onboarding_interrupted = False
+        self._onboarding_file_picker_open = False
         self._closing = False
         self._onboarding_timer = QTimer(self)
         self._onboarding_timer.setSingleShot(True)
@@ -358,7 +358,7 @@ class ImageMagickStudio(QMainWindow):
 
     def _maybe_show_onboarding(self) -> None:
         """Run after startup file dispatch; opening a file takes priority."""
-        if self._closing or not self.isVisible() or self._onboarding_seen_session or self._onboarding_dialog is not None:
+        if self._closing or not self.isVisible() or self._onboarding_seen_session or self._onboarding_page is not None:
             return
         try:
             dismissed = self.preset_store.settings.value(ONBOARDING_SETTINGS_KEY, False, type=bool)
@@ -373,23 +373,32 @@ class ImageMagickStudio(QMainWindow):
         self._show_onboarding()
 
     def _show_onboarding(self) -> None:
-        if self._closing or self._retry_busy():
+        if self._closing or self._retry_busy() or self._onboarding_file_picker_open:
             return
-        if self._onboarding_dialog is not None:
-            self._onboarding_dialog.raise_()
-            self._onboarding_dialog.activateWindow()
+        if self._onboarding_page is not None:
+            self._onboarding_page.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
             return
-        dialog = OnboardingDialog(self)
-        self._onboarding_dialog = dialog
-        self._onboarding_interrupted = False
-        try:
-            dialog.exec()
-            dismissed = not self._onboarding_interrupted and not self._closing
-            add_file = dismissed and dialog.add_file_requested
-        finally:
-            self._onboarding_dialog = None
-            dialog.deleteLater()
-        if not dismissed:
+        page = OnboardingPage(self.content_stack)
+        self._onboarding_page = page
+        page.finished.connect(lambda add_file: self._finish_onboarding(add_file, origin=page))
+        self.content_stack.addWidget(page)
+        self.workspace_page.setEnabled(False)
+        self.content_stack.setCurrentWidget(page)
+        self._update_action_state()
+        page.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _finish_onboarding(self, add_file: bool = False, *, interrupted: bool = False, origin: OnboardingPage | None = None) -> None:
+        page = self._onboarding_page
+        if page is None or (origin is not None and origin is not page):
+            return
+        self._onboarding_page = None
+        self.workspace_page.setEnabled(True)
+        self.content_stack.setCurrentWidget(self.workspace_page)
+        self.content_stack.removeWidget(page)
+        page.hide()
+        page.deleteLater()
+        self._update_action_state()
+        if interrupted or self._closing:
             return
         self._onboarding_seen_session = True
         settings = self.preset_store.settings
@@ -399,13 +408,22 @@ class ImageMagickStudio(QMainWindow):
             self._set_status("Getting started dismissed. Preferences could not be saved; it may appear again next time.")
         if add_file:
             self._choose_onboarding_file()
+        else:
+            source_list = self.video_panel.source_list if self.media_stack.currentIndex() else self.source_list
+            source_list.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _choose_onboarding_file(self) -> None:
-        if self._closing or self._retry_busy():
+        if self._closing or self._retry_busy() or self._onboarding_file_picker_open:
             return
         images = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_SUFFIXES))
         videos = " ".join(f"*{suffix}" for suffix in sorted(VIDEO_SUFFIXES))
-        selected, _ = QFileDialog.getOpenFileName(self, "Add your first file", "", f"Images and videos ({images} {videos});;Images ({images});;Videos ({videos})")
+        self._onboarding_file_picker_open = True
+        self._update_action_state()
+        try:
+            selected, _ = QFileDialog.getOpenFileName(self, "Add your first file", "", f"Images and videos ({images} {videos});;Images ({images});;Videos ({videos})")
+        finally:
+            self._onboarding_file_picker_open = False
+            self._update_action_state()
         # Native pickers run a nested event loop: Finder or a worker can
         # change app state before the user makes a selection.
         if not selected or self._closing or self._retry_busy():
@@ -469,23 +487,26 @@ class ImageMagickStudio(QMainWindow):
             if images and videos:
                 self._show_message(QMessageBox.Icon.Information, "Choose one media type", "Open images and videos as separate batches.")
                 return
-            if self._onboarding_dialog is not None:
-                self._onboarding_interrupted = True
-                self._onboarding_dialog.reject()
+            self._finish_onboarding(interrupted=True)
             self.mode_buttons[1 if videos else 0].click()
             if videos:
                 self.video_panel.set_sources(videos)
             else:
                 self._set_sources(images)
-            self.showNormal()
+            if self.isMinimized() or not self.isVisible():
+                self.showNormal()
             self.raise_()
             self.activateWindow()
 
     def _build_ui(self) -> None:
         self.setStyleSheet(self._stylesheet())
+        self.content_stack = QStackedWidget()
+        self.content_stack.setObjectName("contentStack")
+        self.setCentralWidget(self.content_stack)
         page = QWidget()
         page.setObjectName("page")
-        self.setCentralWidget(page)
+        self.workspace_page = page
+        self.content_stack.addWidget(page)
         outer = QVBoxLayout(page)
         outer.setContentsMargins(30, 26, 30, 20)
         outer.setSpacing(18)
@@ -644,12 +665,16 @@ class ImageMagickStudio(QMainWindow):
         self.video_panel.state_changed.connect(self._update_action_state)
 
     def _open_current_mode(self) -> None:
+        if self._onboarding_page is not None or self._onboarding_file_picker_open:
+            return
         if self.media_stack.currentIndex() == 1:
             self.video_panel.choose_many()
         else:
             self._choose_many()
 
     def _process_current_mode(self) -> None:
+        if self._onboarding_page is not None or self._onboarding_file_picker_open:
+            return
         if self.media_stack.currentIndex() == 1:
             self.video_panel.start_processing()
         else:
@@ -1231,14 +1256,16 @@ class ImageMagickStudio(QMainWindow):
         self._update_source_removal_state()
         video_panel = getattr(self, "video_panel", None)
         busy = self.processing or (video_panel is not None and video_panel.processing)
+        onboarding_active = self._onboarding_page is not None or self._onboarding_file_picker_open
         for button in getattr(self, "mode_buttons", ()):
             button.setEnabled(not busy)
         if self.open_action:
-            self.open_action.setEnabled(not busy)
+            self.open_action.setEnabled(not busy and not onboarding_active)
         if self.save_action:
-            self.save_action.setEnabled(video_panel.process_button.isEnabled() if video_panel is not None and self.media_stack.currentIndex() == 1 else ready)
+            can_save = video_panel.process_button.isEnabled() if video_panel is not None and self.media_stack.currentIndex() == 1 else ready
+            self.save_action.setEnabled(can_save and not onboarding_active)
         if hasattr(self, "getting_started_action"):
-            self.getting_started_action.setEnabled(not self._retry_busy())
+            self.getting_started_action.setEnabled(not self._retry_busy() and not self._onboarding_file_picker_open and not self._closing)
         self._update_preset_controls()
 
     def _update_source_removal_state(self) -> None:
@@ -1480,9 +1507,7 @@ class ImageMagickStudio(QMainWindow):
             return
         self._closing = True
         self._onboarding_timer.stop()
-        if self._onboarding_dialog is not None:
-            self._onboarding_interrupted = True
-            self._onboarding_dialog.reject()
+        self._finish_onboarding(interrupted=True)
         super().closeEvent(event)
 
     def _selected_extension(self, source: Path | None = None) -> str:

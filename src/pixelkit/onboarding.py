@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, QSize, Qt
-from PyQt6.QtGui import QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QShowEvent
+from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
-    QDialog,
+    QApplication,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -42,7 +42,7 @@ class _Illustration(QWidget):
         super().__init__(parent)
         self.kind = kind
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(142 if kind == "compression" else 76)
+        self.setMinimumHeight(180 if kind == "compression" else 110)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         if kind == "compression":
             self.setAccessibleName("Smaller image and video files")
@@ -119,21 +119,34 @@ class _Illustration(QWidget):
 
     def _compression(self, painter: QPainter) -> None:
         # Card size is a visual metaphor, not a promised compression ratio.
-        self._rect(painter, QRectF(0, 3, 570, 168), "#101720", 20, _COLORS["border"])
-        self._rect(painter, QRectF(28, 21, 202, 132), "#17212e", 18)
-        self._media_card(painter, QRectF(45, 35, 109, 94), video=False)
-        self._media_card(painter, QRectF(124, 60, 88, 79), video=True, compact=True)
+        width, height = self.width(), self.height()
+        gap = min(120, max(92, width * .09))
+        panel_width = (width - gap) / 2
+        self._rect(painter, QRectF(0, 0, panel_width, height), "#17212e", 22)
+        self._rect(painter, QRectF(panel_width + gap, 0, panel_width, height), "#152c2d", 22)
+        scale = min(panel_width * .76 / 167, height * .76 / 104)
+        painter.save()
+        painter.translate((panel_width - 167 * scale) / 2, (height - 104 * scale) / 2)
+        painter.scale(scale, scale)
+        self._media_card(painter, QRectF(0, 0, 109, 94), video=False)
+        self._media_card(painter, QRectF(79, 25, 88, 79), video=True, compact=True)
+        painter.restore()
 
-        self._line(painter, QPointF(258, 87), QPointF(310, 87), "#8a75d7", 3)
-        self._line(painter, QPointF(302, 79), QPointF(311, 87), "#8a75d7", 3)
-        self._line(painter, QPointF(302, 95), QPointF(311, 87), "#8a75d7", 3)
+        center = QPointF(width / 2, height / 2)
+        self._line(painter, center + QPointF(-24, 0), center + QPointF(24, 0), "#8a75d7", 3)
+        self._line(painter, center + QPointF(15, -9), center + QPointF(24, 0), "#8a75d7", 3)
+        self._line(painter, center + QPointF(15, 9), center + QPointF(24, 0), "#8a75d7", 3)
 
-        self._rect(painter, QRectF(340, 21, 202, 132), "#152c2d", 18)
-        self._media_card(painter, QRectF(362, 43, 84, 76), video=False, compact=True)
-        self._media_card(painter, QRectF(427, 66, 70, 64), video=True, compact=True)
-        self._rect(painter, QRectF(499, 33, 25, 25), "#32d6c8", 12)
-        self._line(painter, QPointF(506, 45), QPointF(510, 49), "#12322d", 2)
-        self._line(painter, QPointF(510, 49), QPointF(517, 41), "#12322d", 2)
+        painter.save()
+        painter.translate(panel_width + gap + (panel_width - 135 * scale) / 2,
+                          (height - 87 * scale) / 2)
+        painter.scale(scale, scale)
+        self._media_card(painter, QRectF(0, 0, 84, 76), video=False, compact=True)
+        self._media_card(painter, QRectF(65, 23, 70, 64), video=True, compact=True)
+        painter.restore()
+        self._rect(painter, QRectF(width - 52, 22, 30, 30), "#32d6c8", 15)
+        self._line(painter, QPointF(width - 44, 37), QPointF(width - 39, 42), "#12322d", 2)
+        self._line(painter, QPointF(width - 39, 42), QPointF(width - 30, 32), "#12322d", 2)
 
     def _step(self, painter: QPainter) -> None:
         self._rect(painter, QRectF(2, 3, 156, 80), "#101720", 10, "#34465b")
@@ -167,45 +180,47 @@ class _Illustration(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        canvas_width, canvas_height = (570, 174) if self.kind == "compression" else (160, 86)
-        scale = min(self.width() / canvas_width, self.height() / canvas_height)
-        painter.translate((self.width() - canvas_width * scale) / 2,
-                          (self.height() - canvas_height * scale) / 2)
-        painter.scale(scale, scale)
         if self.kind == "compression":
             self._compression(painter)
         else:
+            scale = min(self.width() / 160, self.height() / 86)
+            painter.translate((self.width() - 160 * scale) / 2,
+                              (self.height() - 86 * scale) / 2)
+            painter.scale(scale, scale)
             self._step(painter)
 
 
-class OnboardingDialog(QDialog):
-    """Two pages with no file operations or stored preferences.
+class OnboardingPage(QWidget):
+    """An introduction that fills the main window's content stack.
 
-    After ``exec()`` returns, the caller may open its file chooser when
-    ``add_file_requested`` is true. Skip, Escape and window close reject the
-    dialog; only the final "Add first file…" action accepts and requests a file.
+    The caller owns page removal, persistence and file selection. ``finished``
+    emits once: true for Add first file, false for Skip or Escape.
     """
+
+    finished = pyqtSignal(bool)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.add_file_requested = False
-        self.setWindowTitle("Welcome to PixelKit")
-        self.setObjectName("onboardingDialog")
-        self.setModal(True)
-        self.setMinimumSize(620, 460)
-        self.resize(680, 500)
+        self._finished = False
+        self._layout_growth = -1.0
+        self._responsive_labels: list[tuple[QLabel, float, bool]] = []
+        self._description_labels: list[QLabel] = []
+        self._card_layouts: list[QVBoxLayout] = []
+        self.setObjectName("onboardingPage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self.setAccessibleName("Welcome to PixelKit")
         self.setAccessibleDescription("A two-page introduction. Press Escape to skip at any time.")
-        self.setFont(_font(self, 10.5))
         self.setStyleSheet("""
-            QDialog#onboardingDialog { background: #151b24; color: #f4f7fb; font-size: 10.5pt; }
+            QWidget#onboardingPage { background: #0d1117; color: #f4f7fb; }
             QLabel { color: #f4f7fb; background: transparent; }
             QLabel#onboardingEyebrow { color: #32d6c8; }
             QLabel#onboardingBody, QLabel#onboardingProgress { color: #b3c0d2; }
-            QFrame#onboardingPrivacy { background: #172d2d; border: 1px solid #254443; border-radius: 11px; }
-            QFrame#onboardingStep { background: #1b2431; border: 1px solid #34465b; border-radius: 12px; }
+            QFrame#onboardingPrivacy { background: #172d2d; border: 1px solid #254443; border-radius: 13px; }
+            QFrame#onboardingStep { background: #151b24; border: 1px solid #34465b; border-radius: 16px; }
             QLabel#onboardingStepNumber { color: #c5b5ff; }
-            QPushButton { background: #202a38; color: #f4f7fb; border: 1px solid #697d97; border-radius: 9px; padding: 9px 15px; font-size: 10.5pt; font-weight: 600; }
+            QPushButton { background: #202a38; color: #f4f7fb; border: 1px solid #697d97; border-radius: 10px; padding: 12px 22px; font-size: 12pt; font-weight: 600; }
             QPushButton:hover { background: #2a3749; }
             QPushButton:pressed { background: #344257; }
             QPushButton:focus { border-color: #32d6c8; }
@@ -218,39 +233,37 @@ class OnboardingDialog(QDialog):
             QPushButton#onboardingPrimary:focus { border-color: #f4f7fb; }
         """)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 22, 26, 22)
-        layout.setSpacing(16)
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(40, 28, 40, 28)
+        self._layout.setSpacing(22)
         header = QHBoxLayout()
-        eyebrow = self._label("WELCOME TO PIXELKIT", 9, bold=True, name="onboardingEyebrow")
+        eyebrow = self._label("WELCOME TO PIXELKIT", 10, bold=True, name="onboardingEyebrow")
         eyebrow.setWordWrap(False)
         header.addWidget(eyebrow)
         header.addStretch()
-        self.progress_label = self._label("Step 1 of 2", 9, name="onboardingProgress")
+        self.progress_label = self._label("Step 1 of 2", 10, name="onboardingProgress")
         self.progress_label.setWordWrap(False)
         self.progress_label.setAccessibleName("Step 1 of 2: Smaller files. Easier sharing.")
         header.addWidget(self.progress_label)
-        layout.addLayout(header)
+        self._layout.addLayout(header)
 
         self.page_stack = QStackedWidget()
         self.page_stack.setAccessibleName("PixelKit introduction pages")
         self.page_stack.addWidget(self._benefits_page())
         self.page_stack.addWidget(self._steps_page())
-        layout.addWidget(self.page_stack, 1)
+        self._layout.addWidget(self.page_stack, 1)
 
         actions = QHBoxLayout()
-        actions.setSpacing(10)
+        actions.setSpacing(14)
         self.skip_button = QPushButton("Skip")
         self.skip_button.setObjectName("onboardingSkip")
-        self.skip_button.setAutoDefault(False)
         self.skip_button.setShortcut(QKeySequence("Alt+S"))
         self.skip_button.setAccessibleName("Skip introduction")
-        self.skip_button.setAccessibleDescription("Close this introduction and use PixelKit. Escape also skips.")
-        self.skip_button.clicked.connect(self.reject)
+        self.skip_button.setAccessibleDescription("Finish this introduction and use PixelKit. Escape also skips.")
+        self.skip_button.clicked.connect(self.dismiss)
         actions.addWidget(self.skip_button)
         actions.addStretch()
         self.back_button = QPushButton("Back")
-        self.back_button.setAutoDefault(False)
         self.back_button.setShortcut(QKeySequence("Alt+B"))
         self.back_button.setAccessibleName("Back to step 1")
         self.back_button.setAccessibleDescription("Return to the first page of the introduction.")
@@ -258,35 +271,49 @@ class OnboardingDialog(QDialog):
         actions.addWidget(self.back_button)
         self.next_button = QPushButton("Next")
         self.next_button.setObjectName("onboardingPrimary")
-        self.next_button.setDefault(True)
-        self.next_button.setMinimumWidth(154)
+        self.next_button.setMinimumWidth(188)
         self.next_button.clicked.connect(self._advance)
         actions.addWidget(self.next_button)
-        layout.addLayout(actions)
+        self._layout.addLayout(actions)
         self.setTabOrder(self.skip_button, self.back_button)
         self.setTabOrder(self.back_button, self.next_button)
+
+        self._escape_action = QAction(self)
+        self._escape_action.setShortcut(QKeySequence(Qt.Key.Key_Escape))
+        self._escape_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._escape_action.triggered.connect(self.dismiss)
+        self.addAction(self._escape_action)
+        self._return_action = QAction(self)
+        self._return_action.setShortcuts([QKeySequence(Qt.Key.Key_Return), QKeySequence(Qt.Key.Key_Enter)])
+        self._return_action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._return_action.triggered.connect(self._activate_keyboard_action)
+        self.addAction(self._return_action)
         self._show_page(0)
 
-    def _label(self, text: str, points: float = 10.5, *, bold: bool = False,
+    def _label(self, text: str, points: float = 12, *, bold: bool = False,
                name: str = "") -> QLabel:
         label = QLabel(text)
-        label.setFont(_font(self, points, bold=bold))
-        # The main window sets a font size on all QWidget descendants. An
-        # explicit local rule preserves this hierarchy when it is our parent.
-        label.setStyleSheet(f"font-size: {points}pt; font-weight: {700 if bold else 400};")
+        self._set_label_font(label, points, bold)
+        self._responsive_labels.append((label, points, bold))
         label.setTextFormat(Qt.TextFormat.PlainText)
         label.setWordWrap(True)
         label.setObjectName(name)
         label.setAccessibleName(text)
         return label
 
+    def _set_label_font(self, label: QLabel, points: float, bold: bool) -> None:
+        label.setFont(_font(self, points, bold=bold))
+        # The main window sets a font size on QWidget descendants. Explicit
+        # point sizes preserve the hierarchy and Qt's normal DPI scaling.
+        label.setStyleSheet(f"font-size: {points:.2f}pt; font-weight: {700 if bold else 400};")
+
     def _page(self, title: str, description: str) -> tuple[QWidget, QVBoxLayout]:
         page = QWidget()
         page.setAccessibleName(title)
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(12)
-        layout.addWidget(self._label(title, 21, bold=True, name="onboardingHeading"))
+        layout.setSpacing(16)
+        layout.addWidget(self._label(title, 28, bold=True, name="onboardingHeading"))
         layout.addWidget(self._label(description, name="onboardingBody"))
         return page, layout
 
@@ -300,12 +327,12 @@ class OnboardingDialog(QDialog):
         privacy = QFrame()
         privacy.setObjectName("onboardingPrivacy")
         privacy_layout = QVBoxLayout(privacy)
-        privacy_layout.setContentsMargins(14, 10, 14, 10)
-        privacy_layout.setSpacing(3)
+        privacy_layout.setContentsMargins(20, 14, 20, 14)
+        privacy_layout.setSpacing(5)
         privacy_layout.addWidget(self._label(
-            "Processed on your computer. Originals stay untouched.", 10, bold=True,
+            "Processed on your computer. Originals stay untouched.", 11.5, bold=True,
         ))
-        privacy_layout.addWidget(self._label("Save a new result, ready to share.", 9.5, name="onboardingBody"))
+        privacy_layout.addWidget(self._label("Save a new result, ready to share.", 10.5, name="onboardingBody"))
         layout.addWidget(privacy)
         return page
 
@@ -315,7 +342,7 @@ class OnboardingDialog(QDialog):
             "Three simple steps take you from original to ready to share.",
         )
         steps = QHBoxLayout()
-        steps.setSpacing(12)
+        steps.setSpacing(20)
         for number, kind, title, description in (
             ("01", "add", "Add file", "Choose an image or video from your computer."),
             ("02", "settings", "Choose settings", "Pick a preset, or adjust size and quality."),
@@ -326,20 +353,24 @@ class OnboardingDialog(QDialog):
             card.setAccessibleName(f"Step {number}: {title}")
             card.setAccessibleDescription(description)
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(12, 12, 12, 14)
-            card_layout.setSpacing(9)
-            card_layout.addWidget(self._label(number, 9, bold=True, name="onboardingStepNumber"))
+            card_layout.setContentsMargins(20, 18, 20, 20)
+            card_layout.setSpacing(14)
+            self._card_layouts.append(card_layout)
+            card_layout.addWidget(self._label(number, 10, bold=True, name="onboardingStepNumber"))
             card_layout.addWidget(_Illustration(kind), 1)
-            card_layout.addWidget(self._label(title, 11, bold=True))
-            body = self._label(description, 10, name="onboardingBody")
+            card_layout.addWidget(self._label(title, 14, bold=True))
+            body = self._label(description, 11.5, name="onboardingBody")
             body.setMinimumHeight(body.fontMetrics().lineSpacing() * 3)
             body.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            self._description_labels.append(body)
             card_layout.addWidget(body)
             steps.addWidget(card, 1)
         layout.addLayout(steps, 1)
         return page
 
     def _show_page(self, index: int) -> None:
+        if self._finished:
+            return
         self.page_stack.setCurrentIndex(index)
         self.back_button.setVisible(index == 1)
         self.progress_label.setText(f"Step {index + 1} of 2")
@@ -351,21 +382,52 @@ class OnboardingDialog(QDialog):
         self.next_button.setAccessibleName("Next: step 2" if index == 0 else "Add first file")
         self.next_button.setAccessibleDescription(
             "Continue to the three steps for using PixelKit."
-            if index == 0 else "Close this introduction, then choose an image or video."
+            if index == 0 else "Finish this introduction, then choose an image or video."
         )
         self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
+    def _activate_keyboard_action(self) -> None:
+        focus = QApplication.focusWidget()
+        if focus in (self.skip_button, self.back_button, self.next_button) and focus.isVisible():
+            focus.click()
+        else:
+            self.next_button.click()
+
     def _advance(self) -> None:
+        if self._finished:
+            return
         if self.page_stack.currentIndex() == 0:
             self._show_page(1)
         else:
-            self.add_file_requested = True
-            self.accept()
+            self._finish(True)
 
-    def reject(self) -> None:
-        self.add_file_requested = False
-        super().reject()
+    def _finish(self, add_file: bool) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        self.finished.emit(add_file)
+
+    def dismiss(self) -> None:
+        self._finish(False)
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        super().resizeEvent(event)
+        growth = round(max(0.0, min(1.0, (self.width() - 1040) / 360)), 2)
+        if growth == self._layout_growth:
+            return
+        self._layout_growth = growth
+        horizontal = round(40 + growth * 24)
+        vertical = round(28 + growth * 12)
+        self._layout.setContentsMargins(horizontal, vertical, horizontal, vertical)
+        for label, points, bold in self._responsive_labels:
+            self._set_label_font(label, points * (1 + growth * .12), bold)
+        for label in self._description_labels:
+            label.setMinimumHeight(label.fontMetrics().lineSpacing() * 3)
+        for card_layout in self._card_layouts:
+            inset = round(20 + growth * 8)
+            card_layout.setContentsMargins(inset, inset, inset, inset)
 
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
-        self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
+        if not self._finished:
+            self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)

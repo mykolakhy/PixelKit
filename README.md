@@ -22,7 +22,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Drag-and-drop support for image files and folders.
 - Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
-- Two short getting-started screens on the first ordinary launch introduce image/video processing and the add → settings → save workflow. Skip them at any time or reopen them through **Help → Getting started…**. **Add first file…** accepts an image or video and opens the appropriate mode without starting processing. Opening a file through Finder or the command line takes priority over the introduction.
+- Two short getting-started screens fill the main window on the first ordinary launch and introduce image/video processing and the add → settings → save workflow. Skip them at any time or reopen them through **Help → Getting started…**. **Add first file…** accepts an image or video and opens the appropriate mode without starting processing. Opening a file through Finder or the command line takes priority over the introduction.
 - On macOS: native menu shortcuts and image opening through Finder's **Open With** or the Dock icon.
 - All processing is performed locally on your computer.
 - Built-in processing presets and your own saved presets, available after restarting the app.
