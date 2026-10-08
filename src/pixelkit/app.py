@@ -8,7 +8,7 @@ from dataclasses import replace
 from threading import Event
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QLocale, QThread, QTimer, Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QEvent, QLocale, QSettings, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QImageReader, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
@@ -40,6 +40,7 @@ from PyQt6.QtWidgets import (
 from pixelkit import __version__
 from pixelkit.bug_report import BugReportContext
 from pixelkit.bug_report_dialog import BugReportDialog
+from pixelkit.onboarding import OnboardingDialog
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -54,6 +55,7 @@ from pixelkit.video_presets import VideoPresetStore
 APP_TITLE = "PixelKit"
 ICON_PATH = resource_path("PixelKit.png")
 SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif", ".ico"}
+ONBOARDING_SETTINGS_KEY = "onboarding/dismissed"
 
 
 class ElidedLabel(QLabel):
@@ -280,6 +282,13 @@ class ImageMagickStudio(QMainWindow):
         self.worker: BatchWorker | None = None
         self.last_report: BatchReport | None = None
         self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
+        self._onboarding_dialog: OnboardingDialog | None = None
+        self._onboarding_seen_session = False
+        self._onboarding_interrupted = False
+        self._closing = False
+        self._onboarding_timer = QTimer(self)
+        self._onboarding_timer.setSingleShot(True)
+        self._onboarding_timer.timeout.connect(self._maybe_show_onboarding)
         self.field_errors: dict[QLineEdit, QLabel] = {}
         self.preset_store = preset_store if preset_store is not None else PresetStore()
         self.custom_presets = self.preset_store.load()
@@ -337,10 +346,89 @@ class ImageMagickStudio(QMainWindow):
 
     def _build_help_menu(self) -> None:
         menu = self.menuBar().addMenu("Help")
+        self.getting_started_action = QAction("Getting started…", self)
+        self.getting_started_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.getting_started_action.triggered.connect(self._show_onboarding)
+        menu.addAction(self.getting_started_action)
+        menu.addSeparator()
         self.report_bug_action = QAction("Report a bug…", self)
         self.report_bug_action.setMenuRole(QAction.MenuRole.NoRole)
         self.report_bug_action.triggered.connect(lambda: self._show_bug_report())
         menu.addAction(self.report_bug_action)
+
+    def _maybe_show_onboarding(self) -> None:
+        """Run after startup file dispatch; opening a file takes priority."""
+        if self._closing or not self.isVisible() or self._onboarding_seen_session or self._onboarding_dialog is not None:
+            return
+        try:
+            dismissed = self.preset_store.settings.value(ONBOARDING_SETTINGS_KEY, False, type=bool)
+        except (TypeError, ValueError):
+            dismissed = False
+        if dismissed or self.sources or self.video_panel.sources or self._retry_busy():
+            return
+        if QApplication.activeModalWidget() is not None:
+            # Dependency warnings may run a nested event loop at startup.
+            self._onboarding_timer.start(150)
+            return
+        self._show_onboarding()
+
+    def _show_onboarding(self) -> None:
+        if self._closing or self._retry_busy():
+            return
+        if self._onboarding_dialog is not None:
+            self._onboarding_dialog.raise_()
+            self._onboarding_dialog.activateWindow()
+            return
+        dialog = OnboardingDialog(self)
+        self._onboarding_dialog = dialog
+        self._onboarding_interrupted = False
+        try:
+            dialog.exec()
+            dismissed = not self._onboarding_interrupted and not self._closing
+            add_file = dismissed and dialog.add_file_requested
+        finally:
+            self._onboarding_dialog = None
+            dialog.deleteLater()
+        if not dismissed:
+            return
+        self._onboarding_seen_session = True
+        settings = self.preset_store.settings
+        settings.setValue(ONBOARDING_SETTINGS_KEY, True)
+        settings.sync()
+        if settings.status() != QSettings.Status.NoError:
+            self._set_status("Getting started dismissed. Preferences could not be saved; it may appear again next time.")
+        if add_file:
+            self._choose_onboarding_file()
+
+    def _choose_onboarding_file(self) -> None:
+        if self._closing or self._retry_busy():
+            return
+        images = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_SUFFIXES))
+        videos = " ".join(f"*{suffix}" for suffix in sorted(VIDEO_SUFFIXES))
+        selected, _ = QFileDialog.getOpenFileName(self, "Add your first file", "", f"Images and videos ({images} {videos});;Images ({images});;Videos ({videos})")
+        # Native pickers run a nested event loop: Finder or a worker can
+        # change app state before the user makes a selection.
+        if not selected or self._closing or self._retry_busy():
+            return
+        path = Path(selected)
+        try:
+            if not path.is_file():
+                return
+            if path.suffix.lower() in VIDEO_SUFFIXES:
+                self.video_panel.add_sources([path])
+                index, source_list = 1, self.video_panel.source_list
+            elif path.suffix.lower() in SUPPORTED_SUFFIXES:
+                self._append_sources([path])
+                index, source_list = 0, self.source_list
+            else:
+                return
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._show_message(QMessageBox.Icon.Warning, "Could not add file", f"Choose an accessible image or video and try again.\n\n{exc}")
+            return
+        self.mode_buttons[index].click()
+        self.raise_()
+        self.activateWindow()
+        source_list.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _protected_bug_paths(self) -> tuple[Path, ...]:
         paths = [*self.sources, *self.video_panel.sources]
@@ -375,12 +463,15 @@ class ImageMagickStudio(QMainWindow):
         images = [path for path in paths if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
         videos = [path for path in paths if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES]
         if images or videos:
-            if self.processing or self.video_panel.processing or (self.worker and self.worker.isRunning()):
+            if self._retry_busy():
                 self._show_message(QMessageBox.Icon.Information, "Processing files", "Wait for the current batch to finish before opening more files.")
                 return
             if images and videos:
                 self._show_message(QMessageBox.Icon.Information, "Choose one media type", "Open images and videos as separate batches.")
                 return
+            if self._onboarding_dialog is not None:
+                self._onboarding_interrupted = True
+                self._onboarding_dialog.reject()
             self.mode_buttons[1 if videos else 0].click()
             if videos:
                 self.video_panel.set_sources(videos)
@@ -1146,6 +1237,8 @@ class ImageMagickStudio(QMainWindow):
             self.open_action.setEnabled(not busy)
         if self.save_action:
             self.save_action.setEnabled(video_panel.process_button.isEnabled() if video_panel is not None and self.media_stack.currentIndex() == 1 else ready)
+        if hasattr(self, "getting_started_action"):
+            self.getting_started_action.setEnabled(not self._retry_busy())
         self._update_preset_controls()
 
     def _update_source_removal_state(self) -> None:
@@ -1385,6 +1478,11 @@ class ImageMagickStudio(QMainWindow):
             self._show_message(QMessageBox.Icon.Information, "Processing images", "Wait for image processing to finish before closing PixelKit.")
             event.ignore()
             return
+        self._closing = True
+        self._onboarding_timer.stop()
+        if self._onboarding_dialog is not None:
+            self._onboarding_interrupted = True
+            self._onboarding_dialog.reject()
         super().closeEvent(event)
 
     def _selected_extension(self, source: Path | None = None) -> str:
@@ -1635,6 +1733,7 @@ def main() -> None:
     app.pending_files.extend(Path(argument) for argument in sys.argv[1:])
     QTimer.singleShot(0, app.dispatch_open_files)
     window.show()
+    QTimer.singleShot(0, window._maybe_show_onboarding)
     sys.exit(app.exec())
 
 
