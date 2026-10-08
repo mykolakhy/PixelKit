@@ -93,7 +93,8 @@ Installing the package also provides the `pixelkit` command inside the virtual e
 ```text
 src/pixelkit/       Application package and bundled icons
   app.py           Main window and batch processing
-  onboarding.py    First-run introduction and getting-started illustrations
+  onboarding.py    First-run introduction and getting-started workflow
+  onboarding_art.py Vector artwork for the welcome screen
   presets.py       Built-in presets and saved preferences
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets

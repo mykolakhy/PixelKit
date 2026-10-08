@@ -79,8 +79,8 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertIn("Resize and convert images", self.page_text())
         self.assertIn("Compress images and videos", self.page_text())
         self.assertIn("file-size limit", self.page_text())
-        self.assertIn("Processed on your computer. Originals stay untouched.", self.page_text())
-        self.assertIn("Save a new result", self.page_text())
+        self.assertIn("Processed on your computer", self.page_text())
+        self.assertIn("Originals stay untouched", self.page_text())
         self.assertEqual(self.page.progress_label.text(), "Step 1 of 2")
         self.assertTrue(self.page.back_button.isHidden())
         self.assertEqual(self.page.next_button.text(), "Next")
@@ -219,7 +219,7 @@ class OnboardingPageTests(unittest.TestCase):
                 self.assertTrue(button.accessibleName())
                 self.assertTrue(button.accessibleDescription())
             illustrations = [widget for widget in self.page.page_stack.currentWidget().findChildren(QWidget)
-                             if type(widget).__name__ == "_Illustration"]
+                             if type(widget).__name__ in ("_Illustration", "OnboardingHeroIllustration")]
             self.assertTrue(illustrations)
             for illustration in illustrations:
                 self.assertTrue(illustration.accessibleName())

@@ -469,8 +469,20 @@ class OnboardingIntegrationTests(unittest.TestCase):
         previous_pending = list(self.app.pending_files)
         self.app.pending_files[:] = [finder]
         try:
-            with patch("pixelkit.app.PixelKitApplication", return_value=self.app), patch("pixelkit.app.ImageMagickStudio", return_value=startup), patch("pixelkit.app.sys.platform", "linux"), patch("pixelkit.app.sys.argv", ["pixelkit", str(cli)]), patch("pixelkit.app.QTimer.singleShot", side_effect=lambda delay, callback: callbacks.append((delay, callback))), patch.object(self.app, "exec", return_value=0), patch("pixelkit.app.sys.exit") as exit_app:
+            # Reusing the test application must not replace its native Qt style
+            # beneath existing windows. Fresh-process bundle checks cover that.
+            with (
+                patch("pixelkit.app.PixelKitApplication", return_value=self.app),
+                patch("pixelkit.app.ImageMagickStudio", return_value=startup),
+                patch("pixelkit.app.sys.platform", "linux"),
+                patch("pixelkit.app.sys.argv", ["pixelkit", str(cli)]),
+                patch("pixelkit.app.QTimer.singleShot", side_effect=lambda delay, callback: callbacks.append((delay, callback))),
+                patch.object(self.app, "setStyle") as set_style,
+                patch.object(self.app, "exec", return_value=0),
+                patch("pixelkit.app.sys.exit") as exit_app,
+            ):
                 main()
+            set_style.assert_called_once_with("Fusion")
             exit_app.assert_called_once_with(0)
             self.assertEqual(callbacks, [(0, self.app.dispatch_open_files), (0, startup._maybe_show_onboarding)])
             for _, callback in callbacks:
