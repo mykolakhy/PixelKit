@@ -20,6 +20,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Convert between JPG, PNG, WEBP, AVIF, GIF, BMP, TIFF, and other formats supported by ImageMagick.
 - Remove EXIF and other image metadata.
 - Drag-and-drop support for image files and folders.
+- Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
 - On macOS: native menu shortcuts and image opening through Finder's **Open With** or the Dock icon.
 - All processing is performed locally on your computer.
