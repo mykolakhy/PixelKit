@@ -263,6 +263,42 @@ class RealVideoTests(VideoTestBase):
         self.assertEqual(len(before), len(after))
         self.assertTrue(all(abs(left - right) < 0.001 for left, right in zip(before, after)))
 
+    def test_real_bursty_frame_timing_preserves_frames_and_duration_with_and_without_size_limit(self):
+        source = self.root / "screen recording.mov"
+        # Six frames just 1/600 s apart followed by much longer gaps reproduce
+        # timestamp collisions at the encoder's default nominal frame rate.
+        subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=30:duration=1", "-vf", "settb=1/600,setpts='if(lt(N,6),N,(N-5)*40)'", "-fps_mode", "passthrough", "-enc_time_base:v", "filter", "-c:v", "qtrle", str(source)], check=True, capture_output=True, timeout=30)
+        original = hashlib.sha256(source.read_bytes()).digest()
+
+        def timing(path):
+            result = subprocess.run([find_ffprobe(), "-v", "error", "-select_streams", "v:0", "-show_entries", "format=duration:stream=duration:frame=best_effort_timestamp_time", "-of", "json", str(path)], check=True, capture_output=True, timeout=30)
+            data = json.loads(result.stdout)
+            return [float(frame["best_effort_timestamp_time"]) for frame in data["frames"]], float(data["streams"][0]["duration"]), float(data["format"]["duration"])
+
+        before, stream_duration, duration = timing(source)
+        self.assertEqual(len(before), 30)
+        self.assertLess(before[1] - before[0], 0.002)
+        self.assertGreater(before[-1] - before[-2], 0.06)
+        for target in (None, 7000):
+            with self.subTest(target=target):
+                output = self.root / f"compressed-{target}.mp4"
+                with patch("pixelkit.video.encode_video", wraps=encode_video) as encoder:
+                    report = self.run_worker([(source, output)], VideoSettings(audio="remove", target_bytes=target))
+                self.assertTrue(report.files[0].succeeded, report.files[0].error)
+                after, output_stream_duration, output_duration = timing(output)
+                self.assertEqual(len(before), len(after))
+                self.assertTrue(all(abs(left - right) < 0.0001 for left, right in zip(before, after)))
+                self.assertAlmostEqual(output_stream_duration, stream_duration, places=4)
+                self.assertAlmostEqual(output_duration, duration, places=4)
+                self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), original)
+                if target is not None:
+                    self.assertLessEqual(output.stat().st_size, target)
+                    passes = [call.args[0][call.args[0].index("-pass:v") + 1] for call in encoder.call_args_list if "-pass:v" in call.args[0]]
+                    self.assertIn("1", passes)
+                    self.assertIn("2", passes)
+                subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-xerror", "-i", str(output), "-map", "0:v:0", "-fps_mode", "passthrough", "-enc_time_base:v", "filter", "-f", "null", "-"], check=True, capture_output=True, timeout=30)
+        self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
+
     def test_real_alpha_video_is_rejected_without_replacing_destination(self):
         source, output = self.root / "transparent.mov", self.root / "transparent.mp4"
         subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=red@0.4:s=64x64:r=4:d=0.5,format=argb", "-c:v", "qtrle", str(source)], check=True, capture_output=True, timeout=30)

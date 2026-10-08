@@ -4,13 +4,15 @@ import subprocess
 import shutil
 import sys
 import tempfile
+from dataclasses import replace
 from threading import Event
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QThread, QTimer, Qt, QSize, pyqtSignal
+from PyQt6.QtCore import QEvent, QLocale, QThread, QTimer, Qt, QSize, pyqtSignal
 from PyQt6.QtGui import QAction, QIcon, QImageReader, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
+    QAbstractItemView,
     QButtonGroup,
     QCheckBox,
     QComboBox,
@@ -35,6 +37,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from pixelkit import __version__
+from pixelkit.bug_report import BugReportContext
+from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
@@ -115,12 +120,12 @@ class DropListWidget(QListWidget):
     def __init__(self, suffixes=None, media="images") -> None:
         super().__init__()
         self.suffixes = SUPPORTED_SUFFIXES if suffixes is None else suffixes
-        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DropOnly)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setTextElideMode(Qt.TextElideMode.ElideMiddle)
         self.setAccessibleName(f"Input {media}")
         self.setAccessibleDescription(f"Drop {media} or folders here, or use the file selection buttons.")
-        self.placeholder = QLabel(f"Drop {media} or folders here\nor use the buttons below", self.viewport())
+        self.placeholder = QLabel(f"Drop {media} or folders here\nor use the file selection buttons", self.viewport())
         self.placeholder.setObjectName("dropHint")
         self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.placeholder.setWordWrap(True)
@@ -131,22 +136,47 @@ class DropListWidget(QListWidget):
         self.placeholder.setGeometry(self.viewport().rect().adjusted(16, 12, -16, -12))
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-        else:
-            event.ignore()
+        self._accept_file_drag(event)
+
+    def dragMoveEvent(self, event) -> None:
+        # QListWidget's default handler checks its internal item MIME format
+        # and rejects external file URLs, even after dragEnterEvent accepts.
+        self._accept_file_drag(event)
+
+    @staticmethod
+    def _local_drop_paths(event) -> list[Path]:
+        return [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile() and url.toLocalFile()]
+
+    def _accept_file_drag(self, event) -> bool:
+        if self.isEnabled() and event.possibleActions() & Qt.DropAction.CopyAction:
+            for path in self._local_drop_paths(event):
+                try:
+                    if path.is_dir() or (path.is_file() and path.suffix.lower() in self.suffixes):
+                        # Import into the queue without asking the source app
+                        # to move or remove the original files.
+                        event.setDropAction(Qt.DropAction.CopyAction)
+                        event.accept()
+                        return True
+                except OSError:
+                    continue
+        event.ignore()
+        return False
 
     def dropEvent(self, event) -> None:
-        paths = [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile()]
+        if not self._accept_file_drag(event):
+            return
         files: list[Path] = []
-        for path in paths:
-            if path.is_dir():
-                files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
-            elif path.is_file() and path.suffix.lower() in self.suffixes:
-                files.append(path)
+        for path in self._local_drop_paths(event):
+            try:
+                if path.is_dir():
+                    files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
+                elif path.is_file() and path.suffix.lower() in self.suffixes:
+                    files.append(path)
+            except OSError:
+                # A folder may become unreadable or disappear during a drag.
+                continue
         if files:
             self.files_dropped.emit(files)
-            event.acceptProposedAction()
         else:
             event.ignore()
 
@@ -171,11 +201,25 @@ class BatchWorker(QThread):
     def cancel(self) -> None:
         self.cancel_event.set()
 
+    def _processing_settings(self, command: list[str]) -> tuple[tuple[str, str], ...]:
+        options = command[2:-1]
+        settings = [("Auto orient", "Yes" if "-auto-orient" in options else "No"),
+                    ("Remove metadata", "Yes" if "-strip" in options else "No")]
+        for flag, name in (("-resize", "Resize geometry"), ("-quality", "Maximum quality"), ("-background", "JPEG background")):
+            if flag in options and options.index(flag) + 1 < len(options):
+                settings.append((name, str(options[options.index(flag) + 1])))
+        if "-resize" not in options:
+            settings.append(("Resize geometry", "Original dimensions"))
+        if self.target_bytes is not None:
+            settings.append(("File-size limit", f"{self.target_bytes} bytes"))
+        return tuple(settings)
+
     def run(self) -> None:
         files = []
         for index, (command, output) in enumerate(self.jobs, start=1):
+            settings = self._processing_settings(command)
             if self.cancel_event.is_set():
-                files.append(FileResult(Path(command[1]), output, None, None, "Not processed because the batch was cancelled.", "Skipped"))
+                files.append(FileResult(Path(command[1]), output, None, None, "Not processed because the batch was cancelled.", "Skipped", processing_settings=settings))
                 continue
             source_name = Path(command[1]).name
             before = None
@@ -217,7 +261,7 @@ class BatchWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Conversion completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality))
+            files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality, processing_settings=settings))
             self.progress.emit(index, len(self.jobs), source_name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
 
@@ -232,6 +276,9 @@ class ImageMagickStudio(QMainWindow):
         self.open_action: QAction | None = None
         self.save_action: QAction | None = None
         self.worker: BatchWorker | None = None
+        self.last_report: BatchReport | None = None
+        self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
+        self.field_errors: dict[QLineEdit, QLabel] = {}
         self.preset_store = preset_store if preset_store is not None else PresetStore()
         self.custom_presets = self.preset_store.load()
         self.applying_preset = False
@@ -259,6 +306,7 @@ class ImageMagickStudio(QMainWindow):
 
         if sys.platform == "darwin":
             self._build_macos_menu()
+        self._build_help_menu()
         self._update_action_state()
 
         if not self.magick:
@@ -284,6 +332,42 @@ class ImageMagickStudio(QMainWindow):
         quit_action.setShortcut(QKeySequence(QKeySequence.StandardKey.Quit))
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
+
+    def _build_help_menu(self) -> None:
+        menu = self.menuBar().addMenu("Help")
+        self.report_bug_action = QAction("Report a bug…", self)
+        self.report_bug_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.report_bug_action.triggered.connect(lambda: self._show_bug_report())
+        menu.addAction(self.report_bug_action)
+
+    def _protected_bug_paths(self) -> tuple[Path, ...]:
+        paths = [*self.sources, *self.video_panel.sources]
+        if self.worker is not None:
+            paths.extend(path for command, output in self.worker.jobs for path in (Path(command[1]), output))
+        if self.video_panel.worker is not None:
+            paths.extend(path for source, output in self.video_panel.worker.jobs for path in (source, output))
+        for report in (self.last_report, self.video_panel.last_report):
+            if report is not None:
+                paths.extend(path for file in report.files for path in (file.source, file.output))
+        for edit in (self.output_edit, self.video_panel.output_edit):
+            if edit.text().strip():
+                try:
+                    paths.append(Path(edit.text().strip()).expanduser())
+                except (OSError, ValueError, RuntimeError):
+                    pass
+        return tuple(dict.fromkeys(paths))
+
+    def _show_bug_report(self, context: BugReportContext | None = None) -> None:
+        if context is None:
+            context = BugReportContext(mode="Video" if self.media_stack.currentIndex() else "Images")
+        key = ("failure", id(context.file)) if context.file is not None else ("general", context.mode)
+        protected = tuple(dict.fromkeys((*context.protected_paths, *self._protected_bug_paths())))
+        if key not in self._bug_report_dialogs:
+            self._bug_report_dialogs[key] = BugReportDialog(replace(context, protected_paths=protected), self)
+        dialog = self._bug_report_dialogs[key]
+        dialog.context = replace(dialog.context, protected_paths=tuple(dict.fromkeys((*dialog.context.protected_paths, *protected))))
+        dialog.protected_paths_provider = self._protected_bug_paths
+        dialog.exec()
 
     def open_files(self, paths: list[Path]) -> None:
         images = [path for path in paths if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES]
@@ -326,12 +410,25 @@ class ImageMagickStudio(QMainWindow):
         title_box.setSpacing(2)
         title = QLabel(APP_TITLE)
         title.setObjectName("appTitle")
+        title_row = QHBoxLayout()
+        title_row.setSpacing(8)
+        title_row.addWidget(title)
+        version = QLabel(f"v{__version__}")
+        version.setObjectName("appVersion")
+        version.setAccessibleName(f"PixelKit version {__version__}")
+        title_row.addWidget(version, alignment=Qt.AlignmentFlag.AlignVCenter)
+        title_row.addStretch(1)
         subtitle = QLabel("Resize images and compress videos")
         subtitle.setObjectName("appSubtitle")
-        title_box.addWidget(title)
+        title_box.addLayout(title_row)
         title_box.addWidget(subtitle)
         header.addLayout(title_box)
         header.addStretch(1)
+        self.report_bug_button = QPushButton("Report a bug…")
+        self.report_bug_button.setObjectName("subtleButton")
+        self.report_bug_button.setToolTip("Describe a problem and prepare a public GitHub report")
+        self.report_bug_button.clicked.connect(lambda: self._show_bug_report())
+        header.addWidget(self.report_bug_button, alignment=Qt.AlignmentFlag.AlignTop)
         badge = QLabel("LOCAL PROCESSING")
         badge.setToolTip("Your files are processed on this computer.")
         badge.setObjectName("badge")
@@ -357,7 +454,7 @@ class ImageMagickStudio(QMainWindow):
         self.media_stack.addWidget(image_page)
         outer = QVBoxLayout(image_page)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(18)
+        outer.setSpacing(12)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(10)
@@ -408,9 +505,10 @@ class ImageMagickStudio(QMainWindow):
         self.source_card = self._source_card()
         self.resize_card = self._resize_card()
         self.quality_card = self._quality_card()
-        left.addWidget(self.source_card)
+        self.source_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.resize_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        left.addWidget(self.source_card, 1)
         left.addWidget(self.resize_card)
-        left.addStretch(1)
 
         right.addWidget(self.quality_card)
         right.addWidget(self._output_card())
@@ -431,9 +529,19 @@ class ImageMagickStudio(QMainWindow):
         self.cancel_button.clicked.connect(self._cancel_processing)
         self.cancel_button.hide()
         footer.addWidget(self.cancel_button)
+        self.report_button = QPushButton("View last report")
+        self.report_button.setEnabled(False)
+        self.report_button.clicked.connect(self._show_last_report)
+        footer.addWidget(self.report_button)
+        self.process_button = QPushButton("Process and save")
+        self.process_button.setObjectName("primaryButton")
+        self.process_button.setMinimumHeight(46)
+        self.process_button.clicked.connect(self._start_processing)
+        footer.addWidget(self.process_button)
         outer.addLayout(footer)
         self.output_edit.textChanged.connect(self._output_path_changed)
         self.output_edit.textEdited.connect(lambda _text: setattr(self, "default_output", False))
+        self.output_edit.editingFinished.connect(self._normalize_output_extension)
         self._refresh_presets()
         self.video_panel = VideoPanel(self.colors, DropListWidget(VIDEO_SUFFIXES, "videos"), self._show_message, self, preset_store=VideoPresetStore(self.preset_store.settings))
         self.media_stack.addWidget(self.video_panel)
@@ -531,8 +639,7 @@ class ImageMagickStudio(QMainWindow):
 
     def _current_preset(self) -> Preset:
         def dimension(edit: QLineEdit) -> int | None:
-            text = edit.text().strip()
-            return int(text) if text else None
+            return self._integer_value(edit) if edit.text().strip() else None
 
         longest_side = self.resize_mode.currentIndex() == 1
         return Preset(
@@ -544,7 +651,7 @@ class ImageMagickStudio(QMainWindow):
             quality=self.quality_slider.value(), strip_metadata=self.strip_metadata.isChecked(),
             background=self.background_edit.text().strip() or "#ffffff",
             output_format=self.format_combo.currentText(),
-            target_kib=int(self.target_size_edit.text()) if self.target_size_check.isChecked() else None,
+            target_kib=self._integer_value(self.target_size_edit) if self.target_size_check.isChecked() else None,
         )
 
     def _ask_preset_name(self, suggested: str) -> str | None:
@@ -567,6 +674,7 @@ class ImageMagickStudio(QMainWindow):
         cancel = QPushButton("Cancel")
         cancel.clicked.connect(dialog.reject)
         save = QPushButton("Save")
+        save.setObjectName("primaryButton")
         save.setDefault(True)
         save.setEnabled(bool(suggested.strip()))
         edit.textChanged.connect(lambda text: save.setEnabled(bool(text.strip())))
@@ -649,21 +757,24 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("01", "Input images", "One file, multiple files, or an entire folder"))
 
         self.source_list = DropListWidget()
-        self.source_list.setFixedHeight(145)
-        self.source_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.source_list.files_dropped.connect(self._set_sources)
-        layout.addWidget(self.source_list)
+        self.source_list.setMinimumHeight(110)
+        self.source_list.setMaximumHeight(320)
+        # The list may use spare space, but its preferred height must not
+        # push the resize controls below the viewport.
+        self.source_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        self.source_list.files_dropped.connect(self._append_sources)
+        layout.addWidget(self.source_list, 1)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(8)
         one = QPushButton("One file")
         one.clicked.connect(self._choose_one)
-        many = QPushButton("Multiple files")
+        many = QPushButton("Add images…")
         many.clicked.connect(self._choose_many)
         folder = QPushButton("Folder")
         folder.clicked.connect(self._choose_folder)
@@ -687,12 +798,15 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("02", "Resize", "Leave fields empty to keep the original size"))
         mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Resize mode"))
+        mode_label = QLabel("Resize mode")
+        mode_row.addWidget(mode_label)
         self.resize_mode = DropdownComboBox(self.colors)
+        self.resize_mode.setAccessibleName("Resize mode")
+        mode_label.setBuddy(self.resize_mode)
         self.resize_mode.addItems(["Width × height", "Longest side"])
         mode_row.addStretch(1)
         mode_row.addWidget(self.resize_mode)
@@ -706,11 +820,11 @@ class ImageMagickStudio(QMainWindow):
         standard_grid.setVerticalSpacing(10)
         self.width_edit = QLineEdit()
         self.width_edit.setPlaceholderText("Original")
-        self.width_edit.setValidator(QIntValidator(1, 100000, self))
+        self.width_edit.setValidator(self._integer_validator(1, 100000))
         self.width_edit.setAccessibleName("Width in pixels")
         self.height_edit = QLineEdit()
         self.height_edit.setPlaceholderText("Original")
-        self.height_edit.setValidator(QIntValidator(1, 100000, self))
+        self.height_edit.setValidator(self._integer_validator(1, 100000))
         self.height_edit.setAccessibleName("Height in pixels")
         standard_grid.addWidget(QLabel("Width"), 0, 0)
         standard_grid.addWidget(self.width_edit, 0, 1)
@@ -722,6 +836,8 @@ class ImageMagickStudio(QMainWindow):
         self.keep_ratio.setChecked(True)
         standard_grid.addWidget(self.keep_ratio, 0, 3, 2, 1)
         standard_grid.setColumnStretch(1, 1)
+        standard_grid.addWidget(self._field_error_label(self.width_edit), 2, 0, 1, 4)
+        standard_grid.addWidget(self._field_error_label(self.height_edit), 3, 0, 1, 4)
         self.resize_stack.addWidget(standard_page)
 
         long_side_page = QWidget()
@@ -732,7 +848,7 @@ class ImageMagickStudio(QMainWindow):
         long_side_row.addWidget(QLabel("Longest side"))
         self.long_side_edit = QLineEdit()
         self.long_side_edit.setPlaceholderText("e.g. 1600")
-        self.long_side_edit.setValidator(QIntValidator(1, 100000, self))
+        self.long_side_edit.setValidator(self._integer_validator(1, 100000))
         self.long_side_edit.setAccessibleName("Longest side in pixels")
         self.long_side_edit.setMinimumWidth(120)
         long_side_row.addWidget(self.long_side_edit, 1)
@@ -741,9 +857,11 @@ class ImageMagickStudio(QMainWindow):
         long_side_note.setObjectName("infoLabel")
         long_side_note.setWordWrap(True)
         long_side_layout.addLayout(long_side_row)
+        long_side_layout.addWidget(self._field_error_label(self.long_side_edit))
         long_side_layout.addWidget(long_side_note)
         self.resize_stack.addWidget(long_side_page)
         self.resize_mode.currentIndexChanged.connect(self.resize_stack.setCurrentIndex)
+        self.resize_mode.currentIndexChanged.connect(self._clear_field_errors)
         layout.addWidget(self.resize_stack)
         return card
 
@@ -751,8 +869,8 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("03", "Quality and metadata", "Optimize file size without unnecessary settings"))
         quality_row = QHBoxLayout()
         self.quality_caption = QLabel("Quality")
@@ -772,7 +890,7 @@ class ImageMagickStudio(QMainWindow):
         target_row = QHBoxLayout()
         self.target_size_check = QCheckBox("Limit file size")
         self.target_size_edit = QLineEdit("500")
-        self.target_size_edit.setValidator(QIntValidator(1, 1000000, self))
+        self.target_size_edit.setValidator(self._integer_validator(1, 1000000))
         self.target_size_edit.setAccessibleName("Maximum size per output file in KiB")
         self.target_size_edit.setMaximumWidth(90)
         self.target_size_edit.setEnabled(False)
@@ -783,6 +901,8 @@ class ImageMagickStudio(QMainWindow):
         target_row.addWidget(self.target_size_edit)
         target_row.addWidget(QLabel("KiB"))
         layout.addLayout(target_row)
+        layout.addWidget(self._field_error_label(self.target_size_edit))
+        self.target_size_check.toggled.connect(self._clear_field_errors)
         note = QLabel("JPG, WEBP or AVIF · quality adjusts automatically")
         note.setObjectName("infoLabel")
         note.setWordWrap(True)
@@ -805,8 +925,8 @@ class ImageMagickStudio(QMainWindow):
         card = QFrame()
         card.setObjectName("card")
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(20, 18, 20, 20)
-        layout.setSpacing(12)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(10)
         layout.addWidget(self._section_header("04", "Export", "Output format and save location"))
         format_row = QHBoxLayout()
         format_row.addWidget(QLabel("Format"))
@@ -828,12 +948,80 @@ class ImageMagickStudio(QMainWindow):
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_button)
         layout.addLayout(output_row)
-        self.process_button = QPushButton("Process and save")
-        self.process_button.setObjectName("primaryButton")
-        self.process_button.setMinimumHeight(46)
-        self.process_button.clicked.connect(self._start_processing)
-        layout.addWidget(self.process_button)
+        note = QLabel("The file extension follows the selected format.")
+        note.setObjectName("infoLabel")
+        note.setWordWrap(True)
+        layout.addWidget(note)
         return card
+
+    def _integer_validator(self, minimum: int, maximum: int) -> QIntValidator:
+        validator = QIntValidator(minimum, maximum, self)
+        locale = validator.locale()
+        locale.setNumberOptions(locale.numberOptions() | QLocale.NumberOption.RejectGroupSeparator)
+        validator.setLocale(locale)
+        return validator
+
+    @staticmethod
+    def _integer_value(edit: QLineEdit) -> int:
+        # QIntValidator accepts native digits and locale-specific signs, which
+        # may include bidi marks that Python's int() cannot parse.
+        value, valid = edit.validator().locale().toInt(edit.text().strip())
+        if not valid:
+            raise ValueError("Enter a valid whole number.")
+        return value
+
+    def _field_error_label(self, edit: QLineEdit) -> QLabel:
+        label = QLabel()
+        label.setObjectName("fieldError")
+        label.setWordWrap(True)
+        label.hide()
+        self.field_errors[edit] = label
+        edit.textChanged.connect(lambda _text, field=edit: self._set_field_error(field, ""))
+        return label
+
+    def _set_field_error(self, edit: QLineEdit, message: str) -> None:
+        edit.setProperty("invalid", bool(message))
+        edit.setAccessibleDescription(message)
+        edit.style().unpolish(edit)
+        edit.style().polish(edit)
+        label = self.field_errors[edit]
+        label.setText(message)
+        label.setVisible(bool(message))
+
+    def _clear_field_errors(self, *_args) -> None:
+        for edit in self.field_errors:
+            self._set_field_error(edit, "")
+
+    def _validate_processing_fields(self) -> bool:
+        self._clear_field_errors()
+        dimensions = [self.long_side_edit] if self.resize_mode.currentIndex() == 1 else [self.width_edit, self.height_edit]
+        invalid = []
+        for edit in dimensions:
+            if edit.text().strip() and not edit.hasAcceptableInput():
+                self._set_field_error(edit, "Use 1–100000 px, or leave empty for the original size.")
+                invalid.append(edit)
+        if self.target_size_check.isChecked() and not self.target_size_edit.hasAcceptableInput():
+            self._set_field_error(self.target_size_edit, "Enter a file-size limit from 1 to 1000000 KiB.")
+            invalid.append(self.target_size_edit)
+        if not invalid:
+            return True
+        edit = invalid[0]
+        edit.setFocus()
+        # Wait for the new error label to receive its layout geometry.
+        QTimer.singleShot(0, lambda: self._reveal_field_error(edit))
+        self._set_status("Check the highlighted settings before processing.")
+        if edit is self.target_size_edit:
+            self._show_message(QMessageBox.Icon.Warning, "Check file-size limit", self.field_errors[edit].text())
+        return False
+
+    def _reveal_field_error(self, edit: QLineEdit) -> None:
+        if not edit.property("invalid"):
+            return
+        parent = edit.parentWidget()
+        while parent is not None and not isinstance(parent, QScrollArea):
+            parent = parent.parentWidget()
+        if parent is not None:
+            parent.ensureWidgetVisible(self.field_errors[edit], 10, 10)
 
     def _stylesheet(self) -> str:
         c = self.colors
@@ -846,6 +1034,7 @@ class ImageMagickStudio(QMainWindow):
             QWidget#leftContent, QWidget#rightContent, QScrollArea#leftScroll, QScrollArea#rightScroll {{ background: transparent; border: none; }}
             QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 16px; }}
             QLabel#appTitle {{ color: {c['text']}; font-size: 25px; font-weight: 700; }}
+            QLabel#appVersion {{ color: {c['muted']}; font-size: 12px; font-weight: 400; }}
             QLabel#appSubtitle {{ color: {c['muted']}; font-size: 13px; }}
             QLabel#badge {{ background: #172d2d; color: {c['teal']}; border-radius: 12px; padding: 8px 12px; font-size: 12px; font-weight: 600; }}
             QLabel#sectionTitle {{ color: {c['text']}; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }}
@@ -856,6 +1045,8 @@ class ImageMagickStudio(QMainWindow):
             QLineEdit, QComboBox {{ background: {c['input']}; color: {c['text']}; border: 1px solid {c['control_border']}; border-radius: 9px; padding: 8px 10px; selection-background-color: {c['accent']}; selection-color: white; }}
             QLineEdit {{ placeholder-text-color: {c['muted']}; }}
             QLineEdit:focus, QComboBox:focus {{ border-color: {c['teal']}; }}
+            QLineEdit[invalid="true"] {{ border-color: #ff8c8c; }}
+            QLabel#fieldError {{ color: #ff8c8c; font-size: 12px; }}
             QLineEdit:disabled, QComboBox:disabled {{ background: {c['card']}; color: {c['muted']}; border-color: {c['border']}; }}
             QComboBox {{ padding-right: 32px; }}
             QComboBox:hover {{ background: #243142; border-color: {c['muted']}; }}
@@ -870,10 +1061,16 @@ class ImageMagickStudio(QMainWindow):
             QListWidget::item:selected {{ background: {c['accent']}; color: white; }}
             QListWidget:disabled {{ background: {c['card']}; color: {c['muted']}; border-color: {c['border']}; }}
             QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px 0 2px 2px; }}
-            QScrollBar::handle:vertical {{ background: #3a4658; border-radius: 4px; min-height: 28px; }}
-            QScrollBar::handle:vertical:hover {{ background: #566783; }}
+            QScrollBar::handle:vertical {{ background: {c['control_border']}; border-radius: 4px; min-height: 28px; }}
+            QScrollBar::handle:vertical:hover {{ background: {c['muted']}; }}
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0px; }}
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: transparent; }}
+            QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 2px 2px 0 2px; }}
+            QScrollBar::handle:horizontal {{ background: {c['control_border']}; border-radius: 4px; min-width: 28px; }}
+            QScrollBar::handle:horizontal:hover {{ background: {c['muted']}; }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{ width: 0px; }}
+            QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ background: transparent; }}
+            QAbstractScrollArea::corner {{ background: {c['card']}; }}
             QCheckBox {{ color: #dce5f0; spacing: 8px; }}
             QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 1px solid {c['control_border']}; background: {c['input']}; }}
             QCheckBox::indicator:checked {{ image: url("{check_icon}"); background: {c['accent']}; border-color: {c['accent']}; }}
@@ -920,6 +1117,7 @@ class ImageMagickStudio(QMainWindow):
     def _update_action_state(self) -> None:
         ready = bool(self.magick and self.sources and self.output_edit.text().strip() and not self.processing)
         self.process_button.setEnabled(ready)
+        self.report_button.setEnabled(self.last_report is not None and not self.processing)
         self.clear_button.setEnabled(bool(self.sources) and not self.processing)
         video_panel = getattr(self, "video_panel", None)
         busy = self.processing or (video_panel is not None and video_panel.processing)
@@ -1085,16 +1283,33 @@ class ImageMagickStudio(QMainWindow):
     def _choose_many(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, "Choose images", "", "Images (*.jpg *.jpeg *.png *.webp *.gif *.bmp *.tif *.tiff *.avif *.heic *.ico);;All files (*.*)")
         if paths:
-            self._set_sources([Path(path) for path in paths])
+            self._append_sources([Path(path) for path in paths])
 
     def _choose_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, "Choose an image folder")
         if folder:
             paths = sorted((path for path in Path(folder).iterdir() if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES), key=lambda path: path.name.lower())
             if paths:
-                self._set_sources(paths)
+                self._append_sources(paths)
             else:
                 self._show_message(QMessageBox.Icon.Information, "No images found", "This folder does not contain supported images.")
+
+    def _append_sources(self, paths: list[Path]) -> None:
+        if self.processing or (self.worker and self.worker.isRunning()):
+            return
+        previous = self.sources
+        destination = self.output_edit.text().strip()
+        automatic = self.default_output
+        combined = list(dict.fromkeys([*previous, *(path.resolve() for path in paths if path.is_file())]))
+        if combined == previous:
+            return
+        self._set_sources(combined)
+        if previous and not automatic and destination:
+            output = Path(destination)
+            if len(previous) == 1 and len(combined) > 1:
+                output = output.parent
+            self.output_edit.setText(str(output))
+            self.default_output = False
 
     def _clear_sources(self) -> None:
         if not self.worker or not self.worker.isRunning():
@@ -1110,12 +1325,6 @@ class ImageMagickStudio(QMainWindow):
             event.ignore()
             return
         super().closeEvent(event)
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        if hasattr(self, "source_list"):
-            # Give batches more visible rows when the window has room for them.
-            self.source_list.setFixedHeight(max(145, min(320, self.height() - 635)))
 
     def _selected_extension(self, source: Path | None = None) -> str:
         selected = self.format_combo.currentText().lower()
@@ -1141,6 +1350,23 @@ class ImageMagickStudio(QMainWindow):
     def _format_changed(self) -> None:
         if self.default_output:
             self._set_default_output()
+        else:
+            self._normalize_output_extension()
+
+    def _normalize_output_extension(self) -> None:
+        if len(self.sources) != 1 or not self.output_edit.text().strip():
+            return
+        output = Path(self.output_edit.text().strip())
+        try:
+            if output.expanduser().is_dir():
+                return
+            extension = self._selected_extension()
+            aliases = {"jpeg": "jpg", "tif": "tiff"}
+            if aliases.get(output.suffix.lower().lstrip("."), output.suffix.lower().lstrip(".")) != aliases.get(extension, extension):
+                self.output_edit.setText(str(output.with_suffix(f".{extension}")))
+        except (OSError, ValueError, RuntimeError):
+            # Invalid destinations are explained by the processing action.
+            return
 
     def _choose_output(self) -> None:
         if len(self.sources) > 1:
@@ -1153,16 +1379,20 @@ class ImageMagickStudio(QMainWindow):
         if selected:
             self.output_edit.setText(selected)
             self.default_output = False
+            self._normalize_output_extension()
 
     def _build_command(self, source: Path, output: Path) -> list[str]:
         command = [self.magick, str(source), "-auto-orient"]
         if self.resize_mode.currentIndex() == 1:
             long_side = self.long_side_edit.text().strip()
             if long_side:
+                long_side = str(self._integer_value(self.long_side_edit))
                 command += ["-resize", f"{long_side}x{long_side}"]
         else:
             width = self.width_edit.text().strip()
             height = self.height_edit.text().strip()
+            width = str(self._integer_value(self.width_edit)) if width else ""
+            height = str(self._integer_value(self.height_edit)) if height else ""
             if width or height:
                 if width and height:
                     resize = f"{width}x{height}" if self.keep_ratio.isChecked() else f"{width}x{height}!"
@@ -1191,41 +1421,13 @@ class ImageMagickStudio(QMainWindow):
         if not self.sources:
             self._show_message(QMessageBox.Icon.Information, "No images", "Add at least one image first.")
             return
+        if not self._validate_processing_fields():
+            return
         output_text = self.output_edit.text().strip()
         if not output_text:
             self._show_message(QMessageBox.Icon.Information, "No output location", "Choose an output file or folder.")
             return
-        output = Path(output_text)
         batch = len(self.sources) > 1
-        if batch:
-            output.mkdir(parents=True, exist_ok=True)
-            used: set[Path] = set()
-            outputs: list[Path] = []
-            for source in self.sources:
-                extension = self._selected_extension(source)
-                candidate = output / f"{source.stem}_optimized.{extension}"
-                counter = 2
-                while candidate.resolve() in used or candidate.exists():
-                    candidate = output / f"{source.stem}_optimized_{counter}.{extension}"
-                    counter += 1
-                used.add(candidate.resolve())
-                outputs.append(candidate)
-            existing = [path for path in outputs if path.exists()]
-            if existing and not self._confirm("Files already exist", f"The folder already contains {len(existing)} output files. Overwrite them?"):
-                return
-        else:
-            if not output.suffix:
-                output = output.with_suffix(f".{self._selected_extension()}")
-                self.output_edit.setText(str(output))
-            output.parent.mkdir(parents=True, exist_ok=True)
-            if output.resolve() == self.sources[0].resolve():
-                self._show_message(QMessageBox.Icon.Critical, "Unsafe overwrite", "The output file must be different from the input file.")
-                return
-            if output.exists() and not self._confirm("File already exists", f"Overwrite this file?\n\n{output}"):
-                return
-            outputs = [output]
-
-        jobs = [(self._build_command(source, target), target) for source, target in zip(self.sources, outputs)]
         target_bytes = None
         if self.target_size_check.isChecked():
             try:
@@ -1233,9 +1435,41 @@ class ImageMagickStudio(QMainWindow):
             except ValueError as exc:
                 self._show_message(QMessageBox.Icon.Warning, "Check file-size limit", str(exc))
                 return
-            if any(target.suffix.lower().lstrip(".") not in TARGET_FORMATS for _, target in jobs):
+            if any(self._selected_extension(source) not in TARGET_FORMATS for source in self.sources):
                 self._show_message(QMessageBox.Icon.Warning, "Choose a supported format", "File-size limits support JPG, WEBP and AVIF. Choose one of these output formats.")
                 return
+        try:
+            output = Path(output_text).expanduser()
+            if batch:
+                output.mkdir(parents=True, exist_ok=True)
+                used: set[str] = set()
+                outputs: list[Path] = []
+                for source in self.sources:
+                    extension = self._selected_extension(source)
+                    candidate = output / f"{source.stem}_optimized.{extension}"
+                    counter = 2
+                    while str(candidate.resolve()).casefold() in used or candidate.exists():
+                        candidate = output / f"{source.stem}_optimized_{counter}.{extension}"
+                        counter += 1
+                    used.add(str(candidate.resolve()).casefold())
+                    outputs.append(candidate)
+            else:
+                if output.is_dir():
+                    raise IsADirectoryError("Choose an output file, rather than an existing folder.")
+                self._normalize_output_extension()
+                output = Path(self.output_edit.text().strip()).expanduser()
+                if output.resolve() == self.sources[0].resolve() or (output.exists() and output.samefile(self.sources[0])):
+                    self._show_message(QMessageBox.Icon.Critical, "Unsafe overwrite", "The output file must be different from the input file.")
+                    return
+                output.parent.mkdir(parents=True, exist_ok=True)
+                if output.exists() and not self._confirm("File already exists", f"Overwrite this file?\n\n{output}"):
+                    return
+                outputs = [output]
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._show_message(QMessageBox.Icon.Warning, "Could not prepare output", f"Choose a writable output file or folder and try again. Your images and settings are kept.\n\n{exc}")
+            return
+
+        jobs = [(self._build_command(source, target), target) for source, target in zip(self.sources, outputs)]
         self._set_processing_state(True)
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
@@ -1252,10 +1486,15 @@ class ImageMagickStudio(QMainWindow):
             self._set_status(f"Processing {current} / {total}: {name}")
 
     def _processing_finished(self, report: BatchReport) -> None:
+        self.last_report = report
         self._set_processing_state(False)
         self.progress.hide()
-        self._set_status(f"{'Cancelled' if report.cancelled else 'Done'}: {len(report.successful)} / {len(report.files)} files")
-        ReportDialog(report, self).exec()
+        self._set_status(report.completion_status())
+        self._show_last_report()
+
+    def _show_last_report(self) -> None:
+        if self.last_report is not None and not self.processing:
+            ReportDialog(self.last_report, self).exec()
 
 
 def main() -> None:

@@ -123,7 +123,7 @@ def probe_video(source: Path, ffprobe: str, cancelled: Callable[[], bool] = lamb
         raise ValueError("Supported video files are MP4, MOV, and M4V.")
     result = _run_captured([ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(source.absolute())], cancelled)
     if result.returncode:
-        raise ValueError("Cannot read this video. " + (result.stderr.strip()[-1200:] or "The file may be damaged or unsupported."))
+        raise ValueError("Cannot read this video. " + (result.stderr.strip() or "The file may be damaged or unsupported."))
     try:
         metadata = json.loads(result.stdout)
         streams = metadata["streams"]
@@ -159,7 +159,11 @@ def video_command(ffmpeg: str, source: Path, output: Path, settings: VideoSettin
     scale = f"scale=w='max(2,trunc(iw*sar*{factor}/2)*2)':h='max(2,trunc(ih*{factor}/2)*2)':flags=lanczos,setsar=1"
     command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-xerror", "-progress", "pipe:1", "-nostats", "-i", str(source.absolute()), "-map", f"0:{info.stream_index}", "-vf", scale, "-c:v", "libx264", "-preset", speed]
     command.extend(("-crf", str(crf)) if video_bitrate is None else ("-b:v", str(video_bitrate)))
-    command.extend(("-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"))
+    # Screen recordings can have tightly spaced frames followed by long gaps.
+    # Keep the filter's timestamp precision instead of rounding to a nominal
+    # frame rate. Avoid B-frame reordering, which can shorten the MP4 track's
+    # advertised duration for these irregular timestamps.
+    command.extend(("-pix_fmt", "yuv420p", "-fps_mode", "passthrough", "-enc_time_base:v", "filter", "-bf:v", "0", "-map_metadata", "-1", "-map_chapters", "-1", "-metadata:s:v:0", "rotate=0"))
     if pass_number is not None:
         if pass_number not in {1, 2} or video_bitrate is None or pass_log is None:
             raise ValueError("Two-pass encoding requires a bitrate and private pass log.")
@@ -230,8 +234,9 @@ def encode_video(command: list[str], duration: float, cancelled: Callable[[], bo
                 if cancelled():
                     raise ProcessingCancelled()
                 if process.returncode:
-                    errors.seek(0, os.SEEK_END)
-                    errors.seek(max(0, errors.tell() - 3000))
+                    # Retain the first cause as well as the final failure for
+                    # the report's copy/save error-log actions.
+                    errors.seek(0)
                     message = errors.read().decode("utf-8", "replace").strip()
                     raise ValueError("Could not compress this video. " + (message or "FFmpeg returned an unknown error."))
             finally:
@@ -323,13 +328,18 @@ class VideoWorker(QThread):
         ffmpeg, ffprobe = find_ffmpeg(), find_ffprobe()
         tool_error = None
         tools_checked = False
+        processing_settings = (
+            ("Quality preset", self.settings.preset),
+            ("Resolution", f"Up to {self.settings.max_height}p" if self.settings.max_height else "Original resolution"),
+            ("Audio", self.settings.audio),
+        )
         source_paths = {source.resolve() for source, _ in self.jobs}
         # Default macOS and Windows volumes are case-insensitive. Conservatively
         # reject case-only duplicate destinations on every platform.
         destination_counts = Counter(str(output.resolve()).casefold() for _, output in self.jobs)
         for index, (source, output) in enumerate(self.jobs, start=1):
             if self.cancel_event.is_set():
-                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video", target_bytes=self.settings.target_bytes))
+                files.append(FileResult(source, output, None, None, "Not processed because the batch was cancelled.", "Skipped", media_type="video", target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
                 continue
             started = time.monotonic()
             before = after = None
@@ -381,6 +391,6 @@ class VideoWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Compression completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes))
+            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
             self.progress.emit(index, len(self.jobs), source.name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))

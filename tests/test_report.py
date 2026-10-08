@@ -9,9 +9,12 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtWidgets import QApplication
+from PyQt6.QtWidgets import QApplication, QLabel
+from PyQt6.QtCore import Qt
+from PyQt6.QtTest import QTest
 from pixelkit.app import BatchWorker
-from pixelkit.report import BatchReport, FileResult, ReportDialog, size_change
+from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size, size_change
+from pixelkit.video import VideoInfo, VideoSettings, VideoWorker
 
 
 class ReportTests(unittest.TestCase):
@@ -37,6 +40,144 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(size_change(100, 150), "Larger 50.0%")
         self.assertEqual(size_change(100, 100), "No change")
         self.assertEqual(size_change(0, 1), "—")
+
+    def test_completion_status_distinguishes_failures_successes_and_cancellation(self):
+        good = FileResult(self.root / "one.png", self.root / "one.webp", 100, 40)
+        bad = FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "Encoding failed")
+        cancelled = FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled")
+        skipped = FileResult(self.root / "skipped.png", self.root / "skipped.webp", 100, None, "Not processed", stopped="Skipped")
+        cases = (
+            ((good,), False, "Done: 1 / 1 files processed successfully"),
+            ((bad,), False, "Failed: 0 / 1 files processed successfully · 1 failed"),
+            ((good, bad), False, "Completed: 1 / 2 files processed successfully · 1 failed"),
+            ((good, cancelled, skipped), True, "Cancelled: 1 / 3 files processed successfully"),
+            ((bad, cancelled, skipped), True, "Cancelled: 0 / 3 files processed successfully · 1 failed"),
+            ((), False, "No files processed"),
+        )
+        for files, was_cancelled, expected in cases:
+            with self.subTest(expected=expected):
+                report = BatchReport(files, self.root, cancelled=was_cancelled)
+                self.assertEqual(report.completion_status(), expected)
+                self.assertEqual(report.failed, tuple(file for file in files if file is bad))
+
+    def test_report_opens_on_first_failure_ahead_of_successful_and_stopped_files(self):
+        files = (
+            FileResult(self.root / "good.png", self.root / "good.webp", 100, 40),
+            FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled"),
+            FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "The first failed conversion"),
+            FileResult(self.root / "second.png", self.root / "second.webp", 100, None, "Another failed conversion"),
+        )
+        dialog = ReportDialog(BatchReport(files, self.root, cancelled=True))
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.currentRow(), 2)
+        self.assertEqual(dialog.details.toPlainText(), "The first failed conversion")
+        self.assertFalse(dialog.compare_button.isEnabled())
+        self.assertIn("2 failed", dialog.findChild(QLabel, "reportSummary").text())
+
+    def test_report_scrolls_to_initial_failure_in_a_long_batch(self):
+        files = tuple(FileResult(self.root / f"{row}.png", self.root / f"{row}.webp", 100, 40) for row in range(50))
+        failure = FileResult(self.root / "failed.png", self.root / "failed.webp", 100, None, "Could not encode this file")
+        dialog = ReportDialog(BatchReport(files + (failure,), self.root))
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+        self.assertEqual(dialog.table.currentRow(), 50)
+        self.assertEqual(dialog.details.toPlainText(), failure.error)
+        self.assertGreater(dialog.table.verticalScrollBar().value(), 0)
+        self.assertTrue(dialog.table.viewport().rect().intersects(dialog.table.visualItemRect(dialog.table.item(50, 0))))
+
+    def test_report_opens_on_stopped_file_or_first_success_and_leaves_empty_report_blank(self):
+        good = FileResult(self.root / "good.png", self.root / "good.webp", 100, 40)
+        cancelled = FileResult(self.root / "cancelled.png", self.root / "cancelled.webp", 100, None, "Processing cancelled", stopped="Cancelled")
+        skipped = FileResult(self.root / "skipped.png", self.root / "skipped.webp", 100, None, "Not processed", stopped="Skipped")
+        cases = (
+            ((good, cancelled, skipped), True, 1, "Processing cancelled"),
+            ((good,), False, 0, str(good.output)),
+            ((), False, -1, ""),
+        )
+        for files, was_cancelled, row, details in cases:
+            with self.subTest(row=row):
+                dialog = ReportDialog(BatchReport(files, self.root, cancelled=was_cancelled))
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.table.currentRow(), row)
+                self.assertEqual(dialog.details.toPlainText(), details)
+
+    def test_report_headline_explains_all_failed_and_cancelled_batches(self):
+        bad = FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, "Video encoding failed", media_type="video")
+        cancelled = FileResult(self.root / "cancelled.mov", self.root / "cancelled.mp4", 100, None, "Processing cancelled", stopped="Cancelled", media_type="video")
+        cases = (
+            ((bad,), False, "Processing failed"),
+            ((cancelled,), True, "Processing cancelled"),
+            ((), False, "No files processed"),
+        )
+        for files, was_cancelled, headline in cases:
+            with self.subTest(headline=headline):
+                dialog = ReportDialog(BatchReport(files, self.root, cancelled=was_cancelled))
+                self.addCleanup(dialog.close)
+                self.assertEqual(dialog.findChild(QLabel, "reportSummary").text(), headline)
+
+    def test_published_video_cleanup_failure_reports_processing_outcome_and_keeps_diagnostics(self):
+        source = self.root / "original.mov"
+        output = self.root / "compressed.mp4"
+        original = b"original video" * 100
+        compressed = b"compressed video"
+        source.write_bytes(original)
+        worker = VideoWorker([(source, output)], self.root, VideoSettings())
+        reports = []
+        worker.finished.connect(reports.append)
+
+        def encode(command, duration, cancelled, progress):
+            Path(command[-1]).write_bytes(compressed)
+
+        with patch("pixelkit.video.find_ffmpeg", return_value="ffmpeg"), patch("pixelkit.video.find_ffprobe", return_value="ffprobe"), patch("pixelkit.video._run_captured", return_value=subprocess.CompletedProcess([], 0, " V....D libx264 encoder", "")), patch("pixelkit.video.probe_video", return_value=VideoInfo(2, 0, 320, 180, ())), patch("pixelkit.video.encode_video", side_effect=encode), patch("pixelkit.video.shutil.rmtree", side_effect=PermissionError("Permission denied")) as cleanup:
+            worker.run()
+
+        self.assertEqual(len(reports), 1)
+        report = reports[0]
+        file = report.files[0]
+        cleanup.assert_called_once()
+        self.assertEqual(source.read_bytes(), original)
+        self.assertEqual(output.read_bytes(), compressed)
+        self.assertEqual(file.after, len(compressed))
+        self.assertFalse(file.succeeded)
+        self.assertEqual(file.status, "Failed")
+        self.assertEqual(report.failed, (file,))
+        self.assertEqual((report.before, report.after), (0, 0))
+        self.assertEqual(report.completion_status("videos"), "Failed: 0 / 1 videos processed successfully · 1 failed")
+        self.assertIn("Compression completed.", file.error)
+        self.assertIn(f"Could not remove temporary files at {cleanup.call_args.args[0]}", file.error)
+        self.assertIn("Permission denied", file.error)
+
+        dialog = ReportDialog(report)
+        self.addCleanup(dialog.close)
+        dialog.show()
+        self.app.processEvents()
+        self.assertEqual(dialog.findChild(QLabel, "reportSummary").text(), "Processing failed")
+        self.assertEqual(dialog.table.currentRow(), 0)
+        self.assertEqual(dialog.table.item(0, 0).text(), source.name)
+        self.assertEqual(dialog.table.item(0, 5).text(), "Failed")
+        self.assertEqual(dialog.table.item(0, 5).toolTip(), file.error)
+        self.assertEqual(dialog.details.toPlainText(), file.error)
+        self.assertTrue(dialog.copy_error_button.isEnabled())
+        dialog.copy_error_button.click()
+        self.assertIn(str(output), self.app.clipboard().text())
+        self.assertIn(file.error, self.app.clipboard().text())
+        self.assertTrue(dialog.open_folder.isEnabled())
+        with patch("pixelkit.report.QDesktopServices.openUrl", return_value=True) as open_url:
+            dialog.open_folder.click()
+        self.assertEqual(open_url.call_args.args[0].toLocalFile(), str(self.root.resolve()))
+
+    def test_binary_sizes_use_unambiguous_units_in_summary_and_table(self):
+        self.assertEqual(human_size(0), "0 B")
+        self.assertEqual(human_size(1023), "1023 B")
+        self.assertEqual(human_size(1024), "1.0 KiB")
+        self.assertEqual(human_size(1024 ** 2), "1.0 MiB")
+        self.assertEqual(human_size(1024 ** 3), "1.0 GiB")
+        dialog = ReportDialog(BatchReport((FileResult(self.root / "one.png", self.root / "one.webp", 1024 ** 2, 1024),), self.root))
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.table.item(0, 2).text(), "1.0 MiB")
+        self.assertEqual(dialog.table.item(0, 3).text(), "1.0 KiB")
+        self.assertIn("1.0 MiB → 1.0 KiB", dialog.findChild(QLabel, "reportSummary").text())
 
     def test_worker_captures_original_size_before_conversion_and_reports_failures(self):
         jobs = []
@@ -121,6 +262,80 @@ class ReportTests(unittest.TestCase):
         dialog = ReportDialog(BatchReport((), self.root / "missing"))
         self.addCleanup(dialog.close)
         self.assertFalse(dialog.open_folder.isEnabled())
+
+    def test_known_image_errors_show_recovery_and_preserve_optional_diagnostics(self):
+        cases = (
+            ("magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956.", "damaged or incomplete", "export a fresh copy"),
+            ("magick: no decode delegate for this image format `UNKNOWN' @ error/constitute.c/ReadImage/587.", "cannot read this image format", "Export the image as PNG or JPEG"),
+            ("magick: no encode delegate for this image format `UNKNOWN' @ error/constitute.c/WriteImage/1301.", "cannot save this image format", "Choose PNG or JPEG"),
+            ("magick: unable to open image `private.png': Permission denied @ error/blob.c/OpenBlob/3596.", "could not access", "original image is readable"),
+            ("[WinError 5] Access is denied: 'private.png'", "could not access", "output folder is writable"),
+            ("[Errno 30] Read-only file system: 'out.png'", "could not access", "output folder is writable"),
+            ("[Errno 2] No such file or directory: 'gone.png'", "could not be found", "still exist"),
+        )
+        for error, cause, recovery in cases:
+            with self.subTest(error=error):
+                file = FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, error)
+                dialog = ReportDialog(BatchReport((file,), self.root))
+                self.addCleanup(dialog.close)
+                dialog.table.selectRow(0)
+                self.assertIn(cause, dialog.details.toPlainText())
+                self.assertIn(recovery, dialog.details.toPlainText())
+                self.assertNotIn(error, dialog.details.toPlainText())
+                self.assertFalse(dialog.technical_details_button.isHidden())
+                self.assertEqual(dialog.technical_details_button.text(), "Show technical details")
+                dialog.technical_details_button.click()
+                self.assertIn("Technical details:\n" + error, dialog.details.toPlainText())
+                self.assertEqual(dialog.technical_details_button.text(), "Hide technical details")
+                self.assertEqual(file.error, error)
+                dialog.technical_details_button.click()
+                self.assertNotIn(error, dialog.details.toPlainText())
+
+    def test_unknown_video_and_cleanup_errors_stay_complete_and_selection_resets_details(self):
+        known_error = "magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956."
+        unknown_error = "Encoding error\n" * 100
+        cleanup_error = known_error + "\nCould not remove temporary files at /tmp/output: Permission denied"
+        files = (
+            FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, known_error),
+            FileResult(self.root / "unknown.png", self.root / "unknown.jpg", 100, None, unknown_error),
+            FileResult(self.root / "bad.mov", self.root / "bad.mp4", 100, None, known_error, media_type="video"),
+            FileResult(self.root / "cleanup.png", self.root / "cleanup.jpg", 100, None, cleanup_error),
+        )
+        dialog = ReportDialog(BatchReport(files, self.root))
+        self.addCleanup(dialog.close)
+        dialog.table.selectRow(0)
+        dialog.technical_details_button.click()
+        for row in range(1, len(files)):
+            dialog.table.selectRow(row)
+            self.assertEqual(dialog.details.toPlainText(), files[row].error)
+            self.assertTrue(dialog.technical_details_button.isHidden())
+            self.assertFalse(dialog.technical_details_button.isChecked())
+        dialog.table.selectRow(0)
+        self.assertNotIn(known_error, dialog.details.toPlainText())
+        self.assertFalse(dialog.technical_details_button.isChecked())
+        dialog.table.clearSelection()
+        self.assertEqual(dialog.details.toPlainText(), "")
+        self.assertEqual(dialog.details.toolTip(), "")
+        self.assertTrue(dialog.technical_details_button.isHidden())
+
+    def test_technical_details_keep_keyboard_focus_for_repeated_toggles(self):
+        error = "magick: improper image header `bad.png' @ error/png.c/ReadPNGImage/3956."
+        file = FileResult(self.root / "bad.png", self.root / "bad.jpg", 100, None, error)
+        dialog = ReportDialog(BatchReport((file,), self.root))
+        self.addCleanup(dialog.close)
+        dialog.show()
+        dialog.table.selectRow(0)
+        button = dialog.technical_details_button
+        button.setFocus()
+        self.app.processEvents()
+        QTest.keyClick(button, Qt.Key.Key_Space)
+        self.assertTrue(button.isChecked())
+        self.assertIs(self.app.focusWidget(), button)
+        self.assertTrue(dialog.details.toPlainText().startswith("Technical details:\n" + error))
+        QTest.keyClick(self.app.focusWidget(), Qt.Key.Key_Space)
+        self.assertFalse(button.isChecked())
+        self.assertIs(self.app.focusWidget(), button)
+        self.assertNotIn(error, dialog.details.toPlainText())
 
     def test_video_report_shows_decimal_limit_and_exact_actual_bytes(self):
         good = FileResult(self.root / "one.mov", self.root / "one.mp4", 2_000_000, 995_123, media_type="video", elapsed_seconds=2.0, target_bytes=1_000_000)

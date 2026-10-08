@@ -25,6 +25,8 @@ class VideoPanel(QWidget):
         self.sources = []
         self.worker = None
         self.processing = False
+        self.completed_files = 0
+        self.batch_size = 0
         self.last_report = None
         self.source_list = drop_list
         self.video_preset_store = preset_store if preset_store is not None else VideoPresetStore()
@@ -50,9 +52,8 @@ class VideoPanel(QWidget):
         layout.addWidget(scroll, 1)
 
         inputs, inputs_layout = self._card('Input videos', 'MP4, MOV and M4V · process a file or a batch')
-        self.source_list.setMinimumHeight(180)
-        self.source_list.files_dropped.connect(self.set_sources)
-        inputs_layout.addWidget(self.source_list)
+        self.source_list.setFixedHeight(160)
+        self.source_list.files_dropped.connect(self.add_sources)
         input_actions = QHBoxLayout()
         self.add_button = QPushButton('Add videos…')
         self.add_button.clicked.connect(self.choose_many)
@@ -64,11 +65,12 @@ class VideoPanel(QWidget):
         for button in (self.add_button, self.folder_button, self.clear_button):
             input_actions.addWidget(button)
         inputs_layout.addLayout(input_actions)
+        inputs_layout.addWidget(self.source_list)
         self.source_info = QLabel('Drop videos here to get started')
         self.source_info.setObjectName('infoLabel')
         self.source_info.setWordWrap(True)
         inputs_layout.addWidget(self.source_info)
-        grid.addWidget(inputs, 0, 0, 2, 1)
+        grid.addWidget(inputs, 0, 0, alignment=Qt.AlignmentFlag.AlignTop)
 
         settings, settings_layout = self._card('Compression', 'Choose a balance between quality and file size')
         self.saved_preset_combo = DropdownComboBox(colors)
@@ -149,7 +151,7 @@ class VideoPanel(QWidget):
         note.setWordWrap(True)
         settings_layout.addWidget(note)
         self.audio_combo.setToolTip('Keep audio copies compatible tracks; other audio is converted to high-quality AAC.')
-        grid.addWidget(settings, 0, 1)
+        grid.addWidget(settings, 0, 1, 2, 1, alignment=Qt.AlignmentFlag.AlignTop)
 
         output, output_layout = self._card('Save output', 'MP4 · compatible H.264 video')
         self.output_edit = QLineEdit()
@@ -175,7 +177,7 @@ class VideoPanel(QWidget):
         self.report_button.clicked.connect(self.show_report)
         self.report_button.hide()
         output_layout.addWidget(self.report_button)
-        grid.addWidget(output, 1, 1)
+        grid.addWidget(output, 1, 0, alignment=Qt.AlignmentFlag.AlignTop)
         grid.setRowStretch(2, 1)
         self.locked_widgets = (inputs, settings, self.output_edit, self.output_button)
 
@@ -253,6 +255,28 @@ class VideoPanel(QWidget):
         if not self.available:
             self.status.setText('Video processing is unavailable. Install FFmpeg and FFprobe, then restart PixelKit.')
         self._update_state()
+
+    def add_sources(self, paths: list[Path]) -> None:
+        """Extend the queue without discarding an existing output folder."""
+        if self.processing:
+            return
+        sources = list(dict.fromkeys(path.resolve() for path in [*self.sources, *paths] if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES))
+        if sources == self.sources:
+            return
+        previous_sources = self.sources
+        previous_output = self.output_edit.text().strip()
+        previous_batch = len(previous_sources) > 1
+        previous_default = ''
+        if previous_sources:
+            first = previous_sources[0]
+            previous_default = str(first.parent / 'optimized' if previous_batch else first.with_name(first.stem + '_optimized.mp4'))
+        self.set_sources(sources)
+        if previous_sources and previous_output and previous_output != previous_default:
+            # A single-file destination becomes a folder when a second input
+            # is added. Keep its chosen parent rather than creating a folder
+            # named after the old MP4 file.
+            output = Path(previous_output)
+            self.output_edit.setText(str(output if previous_batch or len(sources) == 1 else output.parent))
 
     def _update_state(self) -> None:
         self._update_target_controls()
@@ -442,14 +466,14 @@ class VideoPanel(QWidget):
     def choose_many(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(self, 'Choose videos', '', 'Videos (*.mp4 *.mov *.m4v)')
         if paths:
-            self.set_sources([Path(path) for path in paths])
+            self.add_sources([Path(path) for path in paths])
 
     def choose_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(self, 'Choose a video folder')
         if folder:
             paths = sorted(path for path in Path(folder).iterdir() if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES)
             if paths:
-                self.set_sources(paths)
+                self.add_sources(paths)
             else:
                 self.show_message(QMessageBox.Icon.Information, 'No videos found', 'This folder does not contain MP4, MOV or M4V videos.')
 
@@ -472,9 +496,9 @@ class VideoPanel(QWidget):
         except ValueError as exc:
             self.show_message(QMessageBox.Icon.Warning, 'Check file size', str(exc))
             return
-        output = Path(text).expanduser()
         batch = len(self.sources) > 1
         try:
+            output = Path(text).expanduser()
             if batch:
                 output.mkdir(parents=True, exist_ok=True)
                 outputs = []
@@ -488,10 +512,12 @@ class VideoPanel(QWidget):
                     used.add(str(candidate.resolve()).casefold())
                     outputs.append(candidate)
             else:
+                if output.is_dir():
+                    raise ValueError('Choose an output file, rather than an existing folder.')
                 if output.suffix.lower() != '.mp4':
                     output = output.with_suffix('.mp4')
                     self.output_edit.setText(str(output))
-                if output.resolve() in self.sources:
+                if output.resolve() in self.sources or (output.exists() and output.samefile(self.sources[0])):
                     raise ValueError('The output file must be different from the original video.')
                 output.parent.mkdir(parents=True, exist_ok=True)
                 if output.exists():
@@ -499,16 +525,18 @@ class VideoPanel(QWidget):
                     if answer != QMessageBox.StandardButton.Yes:
                         return
                 outputs = [output]
-        except (OSError, ValueError) as exc:
+        except (OSError, ValueError, RuntimeError) as exc:
             self.show_message(QMessageBox.Icon.Warning, 'Check output location', str(exc))
             return
         self.worker = VideoWorker(list(zip(self.sources, outputs)), output if batch else output.parent, settings)
         self.worker.encoding_progress.connect(self._encoding_progress)
         self.worker.progress.connect(self._file_progress)
         self.worker.finished.connect(self._finished)
+        self.completed_files = 0
+        self.batch_size = len(self.sources)
         self._set_busy(True)
         self.progress.setValue(0)
-        self.status.setText(f'Preparing 1 / {len(self.sources)}…')
+        self.status.setText(f'File 1 of {self.batch_size} · Preparing…')
         self.worker.start()
 
     def _set_busy(self, busy: bool) -> None:
@@ -526,12 +554,16 @@ class VideoPanel(QWidget):
     def _encoding_progress(self, percent: int, name: str) -> None:
         self.progress.setValue(percent)
         if self.cancel_button.isEnabled():
-            self.status.setText(f'{name} · {percent}%')
+            current = min(self.completed_files + 1, self.batch_size)
+            stage = 'Starting…' if percent == 0 else f'Compressing · {percent}%'
+            self.status.setText(f'File {current} of {self.batch_size} · {stage} · {name}')
             self.status.setToolTip(name)
 
     def _file_progress(self, current: int, total: int, name: str) -> None:
+        self.completed_files = current
+        self.batch_size = total
         if self.cancel_button.isEnabled():
-            self.status.setText(f'Processed {current} / {total} · {name}')
+            self.status.setText(f'File {current} of {total} · Processed · {name}')
 
     def cancel_processing(self) -> None:
         if self.worker and self.processing:
@@ -548,7 +580,7 @@ class VideoPanel(QWidget):
         self.last_report = report
         self._set_busy(False)
         self.report_button.show()
-        self.status.setText(f"{'Cancelled' if report.cancelled else 'Done'}: {len(report.successful)} / {len(report.files)} videos")
+        self.status.setText(report.completion_status("videos"))
         self.show_report()
 
     def show_report(self) -> None:
