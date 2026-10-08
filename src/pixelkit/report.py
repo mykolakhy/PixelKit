@@ -4,8 +4,9 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from PyQt6.QtCore import QIODevice, QSaveFile, Qt, QUrl
+from PyQt6.QtCore import QIODevice, QSaveFile, Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QAbstractItemView, QApplication, QDialog, QFileDialog, QHeaderView, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout
 
@@ -13,6 +14,10 @@ from pixelkit import __version__
 from pixelkit.bug_report import BugReportContext
 from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.comparison import ComparisonDialog
+
+if TYPE_CHECKING:
+    from pixelkit.presets import Preset
+    from pixelkit.video import VideoSettings
 
 
 def human_size(value: int) -> str:
@@ -109,6 +114,7 @@ class BatchReport:
     files: tuple[FileResult, ...]
     output_dir: Path
     cancelled: bool = False
+    retry_settings: Preset | VideoSettings | None = None
 
     @property
     def successful(self) -> tuple[FileResult, ...]:
@@ -142,9 +148,12 @@ class BatchReport:
 
 
 class ReportDialog(QDialog):
+    retry_requested = pyqtSignal(object)
+
     def __init__(self, report: BatchReport, parent=None) -> None:
         super().__init__(parent)
         self.report = report
+        self._retry_enabled = True
         self._bug_dialogs: dict[int, BugReportDialog] = {}
         self.setWindowTitle("Compression report")
         self.setObjectName("compressionReport")
@@ -247,17 +256,60 @@ class ReportDialog(QDialog):
         self.report_bug_button.clicked.connect(self._report_bug)
         buttons.addWidget(self.report_bug_button)
         buttons.addStretch()
+        self.retry_button = QPushButton("Retry failed")
+        self.retry_button.setObjectName("retryFailed")
+        self.retry_button.setToolTip("Return failed files and the original settings to the queue for review. Processing does not start automatically.")
+        self.retry_button.clicked.connect(self._request_retry)
+        self._update_retry_action()
         close = QPushButton("Close")
         close.setDefault(True)
         close.clicked.connect(self.accept)
-        buttons.addWidget(close)
-        layout.addLayout(buttons)
+        if self._retry_available():
+            # Keep every action readable at the report's minimum width.
+            layout.setSpacing(8)
+            footer = QVBoxLayout()
+            footer.setSpacing(8)
+            footer.addLayout(buttons)
+            retry_actions = QHBoxLayout()
+            retry_actions.addWidget(self.retry_button)
+            retry_actions.addStretch()
+            retry_actions.addWidget(close)
+            footer.addLayout(retry_actions)
+            layout.addLayout(footer)
+        else:
+            buttons.addWidget(self.retry_button)
+            buttons.addWidget(close)
+            layout.addLayout(buttons)
         self._update_details()
         if report.files:
             failed_row = next((row for row, file in enumerate(report.files) if not file.succeeded and file.stopped is None), None)
             row = failed_row if failed_row is not None else next((row for row, file in enumerate(report.files) if not file.succeeded), 0)
             self.table.selectRow(row)
             self.table.scrollToItem(self.table.item(row, 0))
+
+    def showEvent(self, event) -> None:
+        self._update_retry_action()
+        super().showEvent(event)
+
+    def set_retry_enabled(self, enabled: bool) -> None:
+        """Allow the controller to inhibit retry while another batch is active."""
+        self._retry_enabled = enabled
+        self._update_retry_action()
+
+    def _retry_available(self) -> bool:
+        return bool(self.report.failed) and self.report.retry_settings is not None
+
+    def _update_retry_action(self) -> None:
+        available = self._retry_available()
+        self.retry_button.setVisible(available)
+        self.retry_button.setEnabled(available and self._retry_enabled and self.receivers(self.retry_requested) > 0)
+
+    def _request_retry(self) -> None:
+        if not self._retry_available() or not self.retry_button.isEnabled() or not self.receivers(self.retry_requested):
+            return
+        # Queue preparation belongs to the controller. Keep this report open if
+        # it declines the request or cannot prepare a retry.
+        self.retry_requested.emit(self.report)
 
     def _selection_changed(self) -> None:
         self.export_status.clear()

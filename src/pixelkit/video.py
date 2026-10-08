@@ -393,4 +393,4 @@ class VideoWorker(QThread):
                         error = f"{error or 'Compression completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
             files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
             self.progress.emit(index, len(self.jobs), source.name)
-        self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
+        self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files), retry_settings=self.settings))

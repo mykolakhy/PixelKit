@@ -44,6 +44,7 @@ from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_me
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
+from pixelkit.retry import validate_retry_output
 from pixelkit.target_size import TARGET_FORMATS, compress_to_size
 from pixelkit.video import VIDEO_SUFFIXES
 from pixelkit.video_panel import VideoPanel
@@ -191,12 +192,13 @@ class BatchWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(object)
 
-    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path, target_bytes: int | None = None) -> None:
+    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path, target_bytes: int | None = None, *, retry_settings: Preset | None = None) -> None:
         super().__init__()
         self.jobs = jobs
         self.output_dir = output_dir
         self.cancel_event = Event()
         self.target_bytes = target_bytes
+        self.retry_settings = retry_settings
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -263,7 +265,7 @@ class BatchWorker(QThread):
                         error = f"{error or 'Conversion completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
             files.append(FileResult(Path(command[1]), output, before, after, error, stopped, quality, processing_settings=settings))
             self.progress.emit(index, len(self.jobs), source_name)
-        self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files)))
+        self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files), self.retry_settings))
 
 
 class ImageMagickStudio(QMainWindow):
@@ -615,27 +617,30 @@ class ImageMagickStudio(QMainWindow):
             group, name = key.split(":", 1)
             presets = BUILTIN_PRESETS if group == "builtin" else self.custom_presets
             preset = presets[name]
-            self.applying_preset = True
-            try:
-                self.resize_mode.setCurrentIndex(1 if preset.resize_mode == "longest_side" else 0)
-                self.width_edit.setText(str(preset.width) if preset.width else "")
-                self.height_edit.setText(str(preset.height) if preset.height else "")
-                self.long_side_edit.setText(str(preset.longest_side) if preset.longest_side else "")
-                self.keep_ratio.setChecked(preset.keep_ratio)
-                self.quality_slider.setValue(preset.quality)
-                self.strip_metadata.setChecked(preset.strip_metadata)
-                self.background_edit.setText(preset.background)
-                self.format_combo.setCurrentText(preset.output_format)
-                self.target_size_check.setChecked(preset.target_kib is not None)
-                self.target_size_edit.setText(str(preset.target_kib or 500))
-                # Keep a manually chosen destination, with the preset's format.
-                if len(self.sources) == 1 and not self.default_output and self.output_edit.text().strip():
-                    output = Path(self.output_edit.text().strip())
-                    if output.suffix:
-                        self.output_edit.setText(str(output.with_suffix(f".{self._selected_extension()}")))
-            finally:
-                self.applying_preset = False
+            self._apply_image_settings(preset)
         self._update_preset_controls()
+
+    def _apply_image_settings(self, preset: Preset) -> None:
+        self.applying_preset = True
+        try:
+            self.resize_mode.setCurrentIndex(1 if preset.resize_mode == "longest_side" else 0)
+            self.width_edit.setText(str(preset.width) if preset.width else "")
+            self.height_edit.setText(str(preset.height) if preset.height else "")
+            self.long_side_edit.setText(str(preset.longest_side) if preset.longest_side else "")
+            self.keep_ratio.setChecked(preset.keep_ratio)
+            self.quality_slider.setValue(preset.quality)
+            self.strip_metadata.setChecked(preset.strip_metadata)
+            self.background_edit.setText(preset.background)
+            self.format_combo.setCurrentText(preset.output_format)
+            self.target_size_check.setChecked(preset.target_kib is not None)
+            self.target_size_edit.setText(str(preset.target_kib or 500))
+            # Keep a manually chosen destination, with the preset's format.
+            if len(self.sources) == 1 and not self.default_output and self.output_edit.text().strip():
+                output = Path(self.output_edit.text().strip())
+                if output.suffix:
+                    self.output_edit.setText(str(output.with_suffix(f".{self._selected_extension()}")))
+        finally:
+            self.applying_preset = False
 
     def _current_preset(self) -> Preset:
         def dimension(edit: QLineEdit) -> int | None:
@@ -1271,8 +1276,8 @@ class ImageMagickStudio(QMainWindow):
         )
         return answer == QMessageBox.StandardButton.Yes
 
-    def _set_sources(self, paths: list[Path]) -> None:
-        unique = list(dict.fromkeys(path.resolve() for path in paths if path.is_file()))
+    def _set_sources(self, paths: list[Path], *, preserve_missing: bool = False) -> None:
+        unique = list(dict.fromkeys(path.resolve() for path in paths if preserve_missing or path.is_file()))
         self.sources = unique
         self.source_list.clear()
         for path in unique:
@@ -1525,13 +1530,18 @@ class ImageMagickStudio(QMainWindow):
             self._show_message(QMessageBox.Icon.Warning, "Could not prepare output", f"Choose a writable output file or folder and try again. Your images and settings are kept.\n\n{exc}")
             return
 
+        try:
+            retry_settings = self._current_preset()
+        except ValueError as exc:
+            self._show_message(QMessageBox.Icon.Warning, "Check image settings", str(exc))
+            return
         jobs = [(self._build_command(source, target), target) for source, target in zip(self.sources, outputs)]
         self._set_processing_state(True)
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
         self.progress.show()
         self._set_status(f"Processing 0 / {len(jobs)}…")
-        self.worker = BatchWorker(jobs, output if batch else output.parent, target_bytes)
+        self.worker = BatchWorker(jobs, output if batch else output.parent, target_bytes, retry_settings=retry_settings)
         self.worker.progress.connect(lambda current, total, name: self._set_progress(current, total, name))
         self.worker.finished.connect(self._processing_finished)
         self.worker.start()
@@ -1542,6 +1552,8 @@ class ImageMagickStudio(QMainWindow):
             self._set_status(f"Processing {current} / {total}: {name}")
 
     def _processing_finished(self, report: BatchReport) -> None:
+        if self.worker:
+            self.worker.wait()
         self.last_report = report
         self._set_processing_state(False)
         self.progress.hide()
@@ -1550,7 +1562,64 @@ class ImageMagickStudio(QMainWindow):
 
     def _show_last_report(self) -> None:
         if self.last_report is not None and not self.processing:
-            ReportDialog(self.last_report, self).exec()
+            dialog = ReportDialog(self.last_report, self)
+            dialog.retry_requested.connect(lambda report: self._retry_failed(report, dialog))
+            dialog.set_retry_enabled(not self._retry_busy())
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+
+    def _retry_busy(self) -> bool:
+        video = self.video_panel
+        return bool(self.processing or (self.worker and self.worker.isRunning()) or video.processing or (video.worker and video.worker.isRunning()))
+
+    def _retry_failed(self, report: BatchReport, dialog: ReportDialog | None = None) -> bool:
+        if self._retry_busy():
+            self._show_message(QMessageBox.Icon.Information, "Processing files", "Wait for the current batch to finish before preparing a retry.")
+            return False
+        if not isinstance(report.retry_settings, Preset) or not report.failed:
+            return False
+        if any(file.media_type != "image" for file in report.failed):
+            return False
+        try:
+            sources = list(dict.fromkeys(file.source.resolve() for file in report.failed))
+            missing = [source for source in sources if not source.is_file()]
+            if missing:
+                self._show_message(QMessageBox.Icon.Warning, "Original images unavailable", "Restore these original files, then choose Retry failed again:\n\n" + "\n".join(str(source) for source in missing))
+                return False
+            output = Path(report.failed[0].output if len(sources) == 1 else report.output_dir).expanduser()
+            validate_retry_output(report, output, single=len(sources) == 1)
+            original_sources = {file.source.resolve() for file in report.files}
+            if any(source not in original_sources for source in self.sources):
+                if not self._confirm("Replace image queue?", f"Replace the current image list with {len(sources)} failed image(s)? The original files and completed results stay on disk."):
+                    return False
+            # A confirmation runs a nested event loop. Check again before
+            # replacing any queue or settings if work or files have changed.
+            if self._retry_busy():
+                return False
+            if any(not source.is_file() for source in sources):
+                self._show_message(QMessageBox.Icon.Warning, "Original images unavailable", "An original image is no longer available. Restore it, then choose Retry failed again.")
+                return False
+            validate_retry_output(report, output, single=len(sources) == 1)
+        except (OSError, ValueError, RuntimeError) as exc:
+            self._show_message(QMessageBox.Icon.Warning, "Could not prepare retry", f"Check that the original images and output location are accessible, then try again.\n\n{exc}")
+            return False
+        self._set_sources(sources, preserve_missing=True)
+        self._apply_image_settings(report.retry_settings)
+        self.preset_combo.setCurrentIndex(0)
+        self.output_edit.setText(str(output))
+        self.default_output = False
+        self._clear_field_errors()
+        self.source_list.setCurrentRow(0)
+        self.media_stack.setCurrentIndex(0)
+        self.mode_buttons[0].setChecked(True)
+        self._set_status(f"Ready to retry {len(sources)} failed image(s). Review the settings, then process and save.")
+        self._update_action_state()
+        if dialog is not None:
+            dialog.accept()
+        self.source_list.setFocus(Qt.FocusReason.OtherFocusReason)
+        return True
 
 
 def main() -> None:
