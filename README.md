@@ -22,7 +22,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Drag-and-drop support for image files and folders.
 - Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
-- Two short getting-started screens fill the main window on the first ordinary launch and introduce image/video processing and the add → settings → save workflow. Skip them at any time or reopen them through **Help → Getting started…**. **Add first file…** accepts an image or video and opens the appropriate mode without starting processing. Opening a file through Finder or the command line takes priority over the introduction.
+- Two short getting-started screens fill the main window on the first ordinary launch and introduce image/video processing and the add → settings → save workflow. Skip them at any time or reopen them through **Help → Getting started…**. **Get started** returns to the workspace without opening a file picker or starting processing; existing files and settings are kept. Opening a file through Finder or the command line takes priority over the introduction.
 - On macOS: native menu shortcuts and image opening through Finder's **Open With** or the Dock icon.
 - All processing is performed locally on your computer.
 - Built-in processing presets and your own saved presets, available after restarting the app.
@@ -38,6 +38,8 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 ## Video compression
 
 Switch to **Video**, add MP4, MOV or M4V files (or drop a folder), then choose **High quality**, **Balanced**, or **Smallest file**. Output is MP4 with H.264 video; select original resolution, up to 1080p, or up to 720p. Aspect ratio is preserved without enlarging smaller videos. Choose to keep audio, compress it, or remove it. Keep audio copies compatible tracks; incompatible audio is converted to high-quality AAC.
+
+Select a queued video and click **Remove**, or press **Delete / Backspace** while its list has focus, to remove that video only. **Clear all** empties the queue. Original files stay on disk, and the queue cannot be changed during processing.
 
 Choose an output file for one video or an output folder for a batch. Batch outputs receive unique filenames. Processing displays progress, supports cancellation, and preserves completed videos. The report includes sizes, savings, errors and elapsed time; **View last report** reopens it. Originals remain intact and partial files are removed. Results that would be larger than or equal to the input are reported without replacing the destination.
 
@@ -91,7 +93,8 @@ Installing the package also provides the `pixelkit` command inside the virtual e
 ```text
 src/pixelkit/       Application package and bundled icons
   app.py           Main window and batch processing
-  onboarding.py    First-run introduction and getting-started illustrations
+  onboarding.py    First-run introduction and getting-started workflow
+  onboarding_art.py Vector artwork for the welcome screen
   presets.py       Built-in presets and saved preferences
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets

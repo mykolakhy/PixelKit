@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QPainter, QPainterPath, QPen, QResizeEvent, QShowEvent
+from PyQt6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPainter, QPainterPath, QPen, QResizeEvent, QShowEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QFrame,
@@ -16,16 +16,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-
-_COLORS = {
-    "background": "#151b24",
-    "surface": "#202a38",
-    "border": "#2b3747",
-    "text": "#f4f7fb",
-    "muted": "#b3c0d2",
-    "accent": "#7452eb",
-    "teal": "#32d6c8",
-}
+from pixelkit.onboarding_art import OnboardingHeroIllustration
+from pixelkit.runtime import resource_path
 
 
 def _font(widget: QWidget, points: float, *, bold: bool = False) -> QFont:
@@ -35,32 +27,57 @@ def _font(widget: QWidget, points: float, *, bold: bool = False) -> QFont:
     return font
 
 
+class _AssuranceIcon(QWidget):
+    """Small decorative symbols; the adjacent text carries the meaning."""
+
+    def __init__(self, kind: str, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.kind = kind
+        self.setFixedSize(24, 24)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor("#32d6c8"), 1.6, Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        if self.kind == "local":
+            painter.drawRoundedRect(QRectF(3, 4, 18, 12), 2, 2)
+            painter.drawLine(QPointF(12, 16), QPointF(12, 20))
+            painter.drawLine(QPointF(8, 20), QPointF(16, 20))
+        else:
+            path = QPainterPath(QPointF(12, 3))
+            path.lineTo(20, 6)
+            path.lineTo(19, 13)
+            path.quadTo(18, 18, 12, 21)
+            path.quadTo(6, 18, 5, 13)
+            path.lineTo(4, 6)
+            path.closeSubpath()
+            painter.drawPath(path)
+            painter.drawLine(QPointF(8, 11), QPointF(11, 14))
+            painter.drawLine(QPointF(11, 14), QPointF(16, 9))
+
+
 class _Illustration(QWidget):
-    """Resolution-independent, decorative media and interface illustrations."""
+    """Resolution-independent previews of the three workflow steps."""
 
     def __init__(self, kind: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.kind = kind
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumHeight(180 if kind == "compression" else 110)
+        self.setMinimumHeight(110)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        if kind == "compression":
-            self.setAccessibleName("Smaller image and video files")
-            self.setAccessibleDescription(
-                "Illustration of image and video files becoming smaller, ready to share. "
-                "Actual file sizes depend on the chosen settings."
-            )
-        else:
-            names = {
-                "add": "Add a media file",
-                "settings": "Choose a preset or adjust settings",
-                "save": "Save a new result",
-            }
-            self.setAccessibleName(names[kind])
-            self.setAccessibleDescription("Decorative preview of this step in PixelKit.")
+        names = {
+            "add": "Add a media file",
+            "settings": "Choose a preset or adjust settings",
+            "save": "Save a new result",
+        }
+        self.setAccessibleName(names[kind])
+        self.setAccessibleDescription("Decorative preview of this step in PixelKit.")
 
     def sizeHint(self) -> QSize:
-        return QSize(570, 174) if self.kind == "compression" else QSize(160, 86)
+        return QSize(160, 86)
 
     @staticmethod
     def _rect(painter: QPainter, rect: QRectF, color: str, radius: float = 12,
@@ -86,68 +103,6 @@ class _Illustration(QWidget):
         painter.setPen(QColor(color))
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
 
-    def _media_card(self, painter: QPainter, rect: QRectF, *, video: bool,
-                    compact: bool = False) -> None:
-        self._rect(painter, rect, "#243244", 12, "#48607a")
-        inset = 8 if compact else 10
-        preview = rect.adjusted(inset, inset, -inset, -24)
-        self._rect(painter, preview, "#302843" if video else "#1b494b", 7)
-        if video:
-            center = preview.center()
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#c0afff"))
-            path = QPainterPath()
-            path.moveTo(center.x() - 6, center.y() - 9)
-            path.lineTo(center.x() + 9, center.y())
-            path.lineTo(center.x() - 6, center.y() + 9)
-            path.closeSubpath()
-            painter.drawPath(path)
-        else:
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor("#66e3ce"))
-            painter.drawEllipse(QPointF(preview.right() - 17, preview.top() + 14), 4, 4)
-            path = QPainterPath()
-            path.moveTo(preview.left() + 7, preview.bottom() - 8)
-            path.lineTo(preview.left() + preview.width() * .36, preview.top() + 15)
-            path.lineTo(preview.left() + preview.width() * .59, preview.bottom() - 17)
-            path.lineTo(preview.left() + preview.width() * .75, preview.top() + 26)
-            path.lineTo(preview.right() - 6, preview.bottom() - 8)
-            path.closeSubpath()
-            painter.drawPath(path)
-        self._text(painter, QRectF(rect.left(), rect.bottom() - 23, rect.width(), 20),
-                   "VIDEO" if video else "IMAGE", _COLORS["muted"], 7.5, bold=True)
-
-    def _compression(self, painter: QPainter) -> None:
-        # Card size is a visual metaphor, not a promised compression ratio.
-        width, height = self.width(), self.height()
-        gap = min(120, max(92, width * .09))
-        panel_width = (width - gap) / 2
-        self._rect(painter, QRectF(0, 0, panel_width, height), "#17212e", 22)
-        self._rect(painter, QRectF(panel_width + gap, 0, panel_width, height), "#152c2d", 22)
-        scale = min(panel_width * .76 / 167, height * .76 / 104)
-        painter.save()
-        painter.translate((panel_width - 167 * scale) / 2, (height - 104 * scale) / 2)
-        painter.scale(scale, scale)
-        self._media_card(painter, QRectF(0, 0, 109, 94), video=False)
-        self._media_card(painter, QRectF(79, 25, 88, 79), video=True, compact=True)
-        painter.restore()
-
-        center = QPointF(width / 2, height / 2)
-        self._line(painter, center + QPointF(-24, 0), center + QPointF(24, 0), "#8a75d7", 3)
-        self._line(painter, center + QPointF(15, -9), center + QPointF(24, 0), "#8a75d7", 3)
-        self._line(painter, center + QPointF(15, 9), center + QPointF(24, 0), "#8a75d7", 3)
-
-        painter.save()
-        painter.translate(panel_width + gap + (panel_width - 135 * scale) / 2,
-                          (height - 87 * scale) / 2)
-        painter.scale(scale, scale)
-        self._media_card(painter, QRectF(0, 0, 84, 76), video=False, compact=True)
-        self._media_card(painter, QRectF(65, 23, 70, 64), video=True, compact=True)
-        painter.restore()
-        self._rect(painter, QRectF(width - 52, 22, 30, 30), "#32d6c8", 15)
-        self._line(painter, QPointF(width - 44, 37), QPointF(width - 39, 42), "#12322d", 2)
-        self._line(painter, QPointF(width - 39, 42), QPointF(width - 30, 32), "#12322d", 2)
-
     def _step(self, painter: QPainter) -> None:
         self._rect(painter, QRectF(2, 3, 156, 80), "#101720", 10, "#34465b")
         for x, color in ((12, "#7452eb"), (20, "#52617c"), (28, "#52617c")):
@@ -161,7 +116,7 @@ class _Illustration(QWidget):
             self._line(painter, QPointF(22, 51), QPointF(34, 51), "#c9bbff")
             self._text(painter, QRectF(40, 35, 98, 31), "Add file…", "#e1d8ff", 9, bold=True)
         elif self.kind == "settings":
-            self._text(painter, QRectF(12, 29, 54, 19), "Preset", _COLORS["muted"], 8)
+            self._text(painter, QRectF(12, 29, 54, 19), "Preset", "#b3c0d2", 8)
             self._rect(painter, QRectF(67, 29, 80, 20), "#29233f", 5, "#7452eb")
             self._text(painter, QRectF(69, 29, 65, 20), "Balanced", "#e1d8ff", 8)
             self._line(painter, QPointF(137, 37), QPointF(140, 40), "#bdb0ff", 1)
@@ -180,24 +135,21 @@ class _Illustration(QWidget):
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        if self.kind == "compression":
-            self._compression(painter)
-        else:
-            scale = min(self.width() / 160, self.height() / 86)
-            painter.translate((self.width() - 160 * scale) / 2,
-                              (self.height() - 86 * scale) / 2)
-            painter.scale(scale, scale)
-            self._step(painter)
+        scale = min(self.width() / 160, self.height() / 86)
+        painter.translate((self.width() - 160 * scale) / 2,
+                          (self.height() - 86 * scale) / 2)
+        painter.scale(scale, scale)
+        self._step(painter)
 
 
 class OnboardingPage(QWidget):
     """An introduction that fills the main window's content stack.
 
-    The caller owns page removal, persistence and file selection. ``finished``
-    emits once: true for Add first file, false for Skip or Escape.
+    The caller owns page removal and persistence. ``finished`` emits once when
+    Get started, Skip or Escape completes the introduction.
     """
 
-    finished = pyqtSignal(bool)
+    finished = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -217,7 +169,6 @@ class OnboardingPage(QWidget):
             QLabel { color: #f4f7fb; background: transparent; }
             QLabel#onboardingEyebrow { color: #32d6c8; }
             QLabel#onboardingBody, QLabel#onboardingProgress { color: #b3c0d2; }
-            QFrame#onboardingPrivacy { background: #172d2d; border: 1px solid #254443; border-radius: 13px; }
             QFrame#onboardingStep { background: #151b24; border: 1px solid #34465b; border-radius: 16px; }
             QLabel#onboardingStepNumber { color: #c5b5ff; }
             QPushButton { background: #202a38; color: #f4f7fb; border: 1px solid #697d97; border-radius: 10px; padding: 12px 22px; font-size: 12pt; font-weight: 600; }
@@ -318,22 +269,51 @@ class OnboardingPage(QWidget):
         return page, layout
 
     def _benefits_page(self) -> QWidget:
-        page, layout = self._page(
-            "Smaller files. Easier sharing.",
-            "Resize and convert images. Compress images and videos, "
-            "with a file-size limit when you need one.",
-        )
-        layout.addWidget(_Illustration("compression"), 1)
-        privacy = QFrame()
-        privacy.setObjectName("onboardingPrivacy")
-        privacy_layout = QVBoxLayout(privacy)
-        privacy_layout.setContentsMargins(20, 14, 20, 14)
-        privacy_layout.setSpacing(5)
-        privacy_layout.addWidget(self._label(
-            "Processed on your computer. Originals stay untouched.", 11.5, bold=True,
-        ))
-        privacy_layout.addWidget(self._label("Save a new result, ready to share.", 10.5, name="onboardingBody"))
-        layout.addWidget(privacy)
+        page = QWidget()
+        page.setAccessibleName("Smaller files. Easier sharing.")
+        layout = QHBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(28)
+        copy = QWidget()
+        copy_layout = QVBoxLayout(copy)
+        copy_layout.setContentsMargins(0, 0, 0, 0)
+        copy_layout.setSpacing(0)
+        copy_layout.addStretch()
+
+        identity = QHBoxLayout()
+        identity.setSpacing(12)
+        logo = QLabel()
+        logo.setObjectName("onboardingLogo")
+        logo.setAccessibleName("PixelKit logo")
+        logo.setFixedSize(44, 44)
+        logo.setPixmap(QIcon(str(resource_path("PixelKit.png"))).pixmap(QSize(44, 44), self.devicePixelRatioF()))
+        identity.addWidget(logo)
+        identity.addWidget(self._label("PixelKit", 19, bold=True))
+        identity.addStretch()
+        copy_layout.addLayout(identity)
+        copy_layout.addSpacing(16)
+        heading = self._label("Smaller files.\nEasier sharing.", 36, bold=True, name="onboardingHeading")
+        copy_layout.addWidget(heading)
+        copy_layout.addSpacing(16)
+        copy_layout.addWidget(self._label("Resize and convert images.\nCompress images and videos.", 12, name="onboardingBody"))
+        copy_layout.addSpacing(8)
+        copy_layout.addWidget(self._label("Set a file-size limit when you need one.", 12, name="onboardingBody"))
+        copy_layout.addSpacing(22)
+
+        for kind, text in (("local", "Processed on your computer"), ("originals", "Originals stay untouched")):
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            row.addWidget(_AssuranceIcon(kind))
+            assurance = self._label(text, 11.5, bold=True, name="onboardingBody")
+            assurance.setWordWrap(False)
+            row.addWidget(assurance)
+            row.addStretch()
+            copy_layout.addLayout(row)
+            if kind == "local":
+                copy_layout.addSpacing(8)
+        copy_layout.addStretch()
+        layout.addWidget(copy, 43)
+        layout.addWidget(OnboardingHeroIllustration(), 57)
         return page
 
     def _steps_page(self) -> QWidget:
@@ -377,12 +357,12 @@ class OnboardingPage(QWidget):
         title = self.page_stack.currentWidget().accessibleName()
         self.progress_label.setAccessibleName(f"Step {index + 1} of 2: {title}")
         self.page_stack.setAccessibleDescription(f"Step {index + 1} of 2. {title}")
-        self.next_button.setText("Next" if index == 0 else "Add first file…")
-        self.next_button.setShortcut(QKeySequence("Alt+N" if index == 0 else "Alt+A"))
-        self.next_button.setAccessibleName("Next: step 2" if index == 0 else "Add first file")
+        self.next_button.setText("Next" if index == 0 else "Get started")
+        self.next_button.setShortcut(QKeySequence("Alt+N" if index == 0 else "Alt+G"))
+        self.next_button.setAccessibleName("Next: step 2" if index == 0 else "Get started")
         self.next_button.setAccessibleDescription(
             "Continue to the three steps for using PixelKit."
-            if index == 0 else "Finish this introduction, then choose an image or video."
+            if index == 0 else "Finish this introduction and use PixelKit."
         )
         self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -399,16 +379,13 @@ class OnboardingPage(QWidget):
         if self.page_stack.currentIndex() == 0:
             self._show_page(1)
         else:
-            self._finish(True)
+            self.dismiss()
 
-    def _finish(self, add_file: bool) -> None:
+    def dismiss(self) -> None:
         if self._finished:
             return
         self._finished = True
-        self.finished.emit(add_file)
-
-    def dismiss(self) -> None:
-        self._finish(False)
+        self.finished.emit()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

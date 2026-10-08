@@ -7,8 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QPoint, QSettings, Qt
-from PyQt6.QtTest import QTest
+from PyQt6.QtCore import QElapsedTimer, QPoint, QSettings, Qt
+from PyQt6.QtGui import QKeySequence
+from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QWidget
 
 from pixelkit.app import ImageMagickStudio
@@ -32,13 +33,20 @@ class OnboardingPageTests(unittest.TestCase):
         self.window.content_stack.addWidget(self.page)
         self.window.content_stack.setCurrentWidget(self.page)
         self.finished = []
-        self.page.finished.connect(self.finished.append)
+        self.page.finished.connect(lambda: self.finished.append(None))
         self.window.show()
         self.window.activateWindow()
         self.app.processEvents()
 
     def page_text(self):
         return " ".join(label.text() for label in self.page.page_stack.currentWidget().findChildren(QLabel))
+
+    def assert_eventually(self, condition, message):
+        timer = QElapsedTimer()
+        timer.start()
+        while not condition() and timer.elapsed() < 2000:
+            QTest.qWait(10)
+        self.assertTrue(condition(), message)
 
     def assert_contents_fit(self):
         """The introduction fills the host, and all its content fits without scrolling."""
@@ -71,8 +79,8 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertIn("Resize and convert images", self.page_text())
         self.assertIn("Compress images and videos", self.page_text())
         self.assertIn("file-size limit", self.page_text())
-        self.assertIn("Processed on your computer. Originals stay untouched.", self.page_text())
-        self.assertIn("Save a new result", self.page_text())
+        self.assertIn("Processed on your computer", self.page_text())
+        self.assertIn("Originals stay untouched", self.page_text())
         self.assertEqual(self.page.progress_label.text(), "Step 1 of 2")
         self.assertTrue(self.page.back_button.isHidden())
         self.assertEqual(self.page.next_button.text(), "Next")
@@ -85,7 +93,7 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertIn("Start with your first file", self.page_text())
         for action in ("Add file", "Choose settings", "Save result"):
             self.assertIn(action, self.page_text())
-        self.assertEqual(self.page.next_button.text(), "Add first file…")
+        self.assertEqual(self.page.next_button.text(), "Get started")
         self.assertEqual(self.page.progress_label.text(), "Step 2 of 2")
         self.assertFalse(self.page.back_button.isHidden())
         self.page.back_button.click()
@@ -95,16 +103,16 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.finished, [])
         self.assertIs(self.app.focusWidget(), self.page.next_button)
 
-    def test_return_advances_and_enter_requests_a_file_once(self):
+    def test_return_advances_and_enter_completes_once(self):
         QTest.keyClick(self.page.next_button, Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(self.page.page_stack.currentIndex(), 1)
         self.assertEqual(self.finished, [])
         QTest.keyClick(self.page.next_button, Qt.Key.Key_Enter)
-        self.assertEqual(self.finished, [True])
+        self.assertEqual(self.finished, [None])
         self.page.next_button.click()
         self.page.dismiss()
-        self.assertEqual(self.finished, [True])
+        self.assertEqual(self.finished, [None])
         self.assertTrue(self.window.isVisible())
 
     def test_return_activates_focused_back_or_skip_instead_of_next(self):
@@ -115,7 +123,29 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.finished, [])
         self.page.skip_button.setFocus()
         QTest.keyClick(self.page.skip_button, Qt.Key.Key_Return)
-        self.assertEqual(self.finished, [False])
+        self.assertEqual(self.finished, [None])
+
+    def test_action_shortcuts_navigate_and_get_started_once(self):
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 1, "Alt+N did not advance the introduction")
+        self.assertEqual(self.page.page_stack.currentIndex(), 1)
+        self.assertEqual(self.page.next_button.shortcut(), QKeySequence("Alt+G"))
+        self.assertEqual(self.page.next_button.accessibleName(), "Get started")
+        self.assertEqual(self.page.next_button.accessibleDescription(), "Finish this introduction and use PixelKit.")
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+B"))
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 0, "Alt+B did not return to the first page")
+        self.assertEqual(self.page.page_stack.currentIndex(), 0)
+        self.assertEqual(self.finished, [])
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 1, "Alt+N did not advance the introduction again")
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
+        self.assert_eventually(lambda: bool(self.finished), "Alt+G did not complete the introduction")
+        self.assertEqual(self.finished, [None])
+        repeated_click = QSignalSpy(self.page.next_button.clicked)
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
+        self.assert_eventually(lambda: len(repeated_click) > 0, "Repeated Alt+G did not finish its button activation")
+        self.assertEqual(len(repeated_click), 1)
+        self.assertEqual(self.finished, [None])
 
     def test_return_on_the_page_itself_activates_next(self):
         self.page.setFocus()
@@ -123,7 +153,7 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.page.page_stack.currentIndex(), 1)
         self.assertEqual(self.finished, [])
 
-    def test_skip_dismiss_and_escape_emit_false_once(self):
+    def test_skip_dismiss_and_escape_complete_once(self):
         for index, action in ((0, "skip"), (1, "skip"), (0, "escape"), (1, "escape"), (1, "dismiss")):
             with self.subTest(page=index, action=action):
                 page = OnboardingPage(self.window.content_stack)
@@ -131,7 +161,7 @@ class OnboardingPageTests(unittest.TestCase):
                 self.window.content_stack.setCurrentWidget(page)
                 page._show_page(index)
                 results = []
-                page.finished.connect(results.append)
+                page.finished.connect(lambda: results.append(None))
                 self.app.processEvents()
                 if action == "skip":
                     page.skip_button.click()
@@ -141,10 +171,10 @@ class OnboardingPageTests(unittest.TestCase):
                     QTest.keyClick(button, Qt.Key.Key_Escape)
                 else:
                     page.dismiss()
-                self.assertEqual(results, [False])
+                self.assertEqual(results, [None])
                 page.dismiss()
                 page.next_button.click()
-                self.assertEqual(results, [False])
+                self.assertEqual(results, [None])
                 self.assertTrue(self.window.isVisible())
                 self.window.content_stack.removeWidget(page)
                 page.deleteLater()
@@ -152,7 +182,7 @@ class OnboardingPageTests(unittest.TestCase):
 
     def test_finishing_does_not_hide_or_remove_content_owned_by_the_controller(self):
         self.page.dismiss()
-        self.assertEqual(self.finished, [False])
+        self.assertEqual(self.finished, [None])
         self.assertIs(self.window.content_stack.currentWidget(), self.page)
         self.assertTrue(self.page.isVisible())
 
@@ -189,7 +219,7 @@ class OnboardingPageTests(unittest.TestCase):
                 self.assertTrue(button.accessibleName())
                 self.assertTrue(button.accessibleDescription())
             illustrations = [widget for widget in self.page.page_stack.currentWidget().findChildren(QWidget)
-                             if type(widget).__name__ == "_Illustration"]
+                             if type(widget).__name__ in ("_Illustration", "OnboardingHeroIllustration")]
             self.assertTrue(illustrations)
             for illustration in illustrations:
                 self.assertTrue(illustration.accessibleName())

@@ -5,8 +5,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from PyQt6.QtCore import QLocale, Qt, pyqtSignal
-from PyQt6.QtGui import QDoubleValidator
-from PyQt6.QtWidgets import QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtGui import QAction, QDoubleValidator, QKeySequence
+from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
 
 from pixelkit.report import BatchReport, ReportDialog, human_size
 from pixelkit.retry import validate_retry_output
@@ -54,16 +54,29 @@ class VideoPanel(QWidget):
 
         inputs, inputs_layout = self._card('Input videos', 'MP4, MOV and M4V · process a file or a batch')
         self.source_list.setFixedHeight(160)
+        self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.source_list.files_dropped.connect(self.add_sources)
         input_actions = QHBoxLayout()
+        input_actions.setSpacing(8)
         self.add_button = QPushButton('Add videos…')
         self.add_button.clicked.connect(self.choose_many)
         self.folder_button = QPushButton('Folder…')
         self.folder_button.clicked.connect(self.choose_folder)
-        self.clear_button = QPushButton('Clear')
+        self.remove_button = QPushButton('Remove')
+        self.remove_button.setAccessibleName('Remove selected input video')
+        self.remove_button.clicked.connect(self._remove_selected_source)
+        self.remove_source_action = QAction('Remove selected video', self.source_list)
+        self.remove_source_action.setShortcuts([QKeySequence(Qt.Key.Key_Delete), QKeySequence(Qt.Key.Key_Backspace)])
+        self.remove_source_action.setShortcutContext(Qt.ShortcutContext.WidgetShortcut)
+        self.remove_source_action.triggered.connect(self._remove_selected_source)
+        self.source_list.addAction(self.remove_source_action)
+        self.source_list.itemSelectionChanged.connect(self._update_source_removal_state)
+        self.clear_button = QPushButton('Clear all')
+        self.clear_button.setAccessibleName('Clear all input videos')
         self.clear_button.setObjectName('subtleButton')
-        self.clear_button.clicked.connect(lambda: self.set_sources([]))
-        for button in (self.add_button, self.folder_button, self.clear_button):
+        self.clear_button.setToolTip('Remove all videos from the list. Original files stay on disk.')
+        self.clear_button.clicked.connect(self._clear_sources)
+        for button in (self.add_button, self.folder_button, self.remove_button, self.clear_button):
             input_actions.addWidget(button)
         inputs_layout.addLayout(input_actions)
         inputs_layout.addWidget(self.source_list)
@@ -246,6 +259,17 @@ class VideoPanel(QWidget):
             item = QListWidgetItem(path.name)
             item.setToolTip(str(path))
             self.source_list.addItem(item)
+        self.output_edit.setText(self._default_output())
+        self._refresh_source_state()
+
+    def _default_output(self) -> str:
+        if not self.sources:
+            return ''
+        source = self.sources[0]
+        return str(source.parent / 'optimized' if len(self.sources) > 1 else source.with_name(source.stem + '_optimized.mp4'))
+
+    def _refresh_source_state(self) -> None:
+        self.source_list.placeholder.setVisible(not self.sources)
         count = len(self.sources)
         total_size = unavailable = 0
         for path in self.sources:
@@ -261,8 +285,6 @@ class VideoPanel(QWidget):
         self.output_edit.setPlaceholderText('Output folder' if batch else 'Output file')
         self.output_button.setText('Choose folder…' if batch else 'Choose…')
         if self.sources:
-            source = self.sources[0]
-            self.output_edit.setText(str(source.parent / 'optimized' if batch else source.with_name(source.stem + '_optimized.mp4')))
             self.status.setText(f'Selected videos: {count}')
         else:
             self.output_edit.clear()
@@ -270,6 +292,33 @@ class VideoPanel(QWidget):
         if not self.available:
             self.status.setText('Video processing is unavailable. Install FFmpeg and FFprobe, then restart PixelKit.')
         self._update_state()
+
+    def _remove_selected_source(self) -> None:
+        if self._retry_busy():
+            return
+        row = self.source_list.currentRow()
+        item = self.source_list.currentItem()
+        if not (0 <= row < len(self.sources)) or item is None or not item.isSelected():
+            return
+        was_batch = len(self.sources) > 1
+        destination = self.output_edit.text().strip()
+        automatic = destination == self._default_output()
+        # Keep the validated queue intact, even if another original has since
+        # disappeared. Removing a row never deletes a file from disk.
+        self.sources.pop(row)
+        self.source_list.takeItem(row)
+        if automatic:
+            self.output_edit.setText(self._default_output())
+        elif was_batch and len(self.sources) == 1 and destination:
+            self.output_edit.setText(str(Path(destination) / f'{self.sources[0].stem}_optimized.mp4'))
+        self._refresh_source_state()
+        if self.sources:
+            self.source_list.setCurrentRow(min(row, len(self.sources) - 1))
+        self.source_list.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _clear_sources(self) -> None:
+        if not self._retry_busy():
+            self._replace_sources([])
 
     def add_sources(self, paths: list[Path]) -> None:
         """Extend the queue without discarding an existing output folder."""
@@ -297,9 +346,20 @@ class VideoPanel(QWidget):
         self._update_target_controls()
         self._update_preset_controls()
         self.process_button.setEnabled(self.available and bool(self.sources) and bool(self.output_edit.text().strip()) and not self.processing)
-        self.clear_button.setEnabled(bool(self.sources) and not self.processing)
+        self.clear_button.setEnabled(bool(self.sources) and not self._retry_busy())
+        self._update_source_removal_state()
         self.report_button.setEnabled(self.last_report is not None and not self.processing)
         self.state_changed.emit()
+
+    def _update_source_removal_state(self) -> None:
+        selected = bool(self.source_list.selectedItems())
+        enabled = selected and not self._retry_busy()
+        self.remove_button.setEnabled(enabled)
+        self.remove_source_action.setEnabled(enabled)
+        self.remove_button.setToolTip(
+            'Remove selected video from the list (Delete / Backspace). The original file stays on disk.'
+            if selected else 'Select a video to remove it. Original files stay on disk.'
+        )
 
     def _update_target_controls(self) -> None:
         limited = self.target_size_check.isChecked()

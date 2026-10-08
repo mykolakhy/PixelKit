@@ -284,7 +284,6 @@ class ImageMagickStudio(QMainWindow):
         self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
         self._onboarding_page: OnboardingPage | None = None
         self._onboarding_seen_session = False
-        self._onboarding_file_picker_open = False
         self._closing = False
         self._onboarding_timer = QTimer(self)
         self._onboarding_timer.setSingleShot(True)
@@ -373,21 +372,21 @@ class ImageMagickStudio(QMainWindow):
         self._show_onboarding()
 
     def _show_onboarding(self) -> None:
-        if self._closing or self._retry_busy() or self._onboarding_file_picker_open:
+        if self._closing or self._retry_busy():
             return
         if self._onboarding_page is not None:
             self._onboarding_page.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
             return
         page = OnboardingPage(self.content_stack)
         self._onboarding_page = page
-        page.finished.connect(lambda add_file: self._finish_onboarding(add_file, origin=page))
+        page.finished.connect(lambda: self._finish_onboarding(origin=page))
         self.content_stack.addWidget(page)
         self.workspace_page.setEnabled(False)
         self.content_stack.setCurrentWidget(page)
         self._update_action_state()
         page.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
-    def _finish_onboarding(self, add_file: bool = False, *, interrupted: bool = False, origin: OnboardingPage | None = None) -> None:
+    def _finish_onboarding(self, *, interrupted: bool = False, origin: OnboardingPage | None = None) -> None:
         page = self._onboarding_page
         if page is None or (origin is not None and origin is not page):
             return
@@ -406,46 +405,7 @@ class ImageMagickStudio(QMainWindow):
         settings.sync()
         if settings.status() != QSettings.Status.NoError:
             self._set_status("Getting started dismissed. Preferences could not be saved; it may appear again next time.")
-        if add_file:
-            self._choose_onboarding_file()
-        else:
-            source_list = self.video_panel.source_list if self.media_stack.currentIndex() else self.source_list
-            source_list.setFocus(Qt.FocusReason.OtherFocusReason)
-
-    def _choose_onboarding_file(self) -> None:
-        if self._closing or self._retry_busy() or self._onboarding_file_picker_open:
-            return
-        images = " ".join(f"*{suffix}" for suffix in sorted(SUPPORTED_SUFFIXES))
-        videos = " ".join(f"*{suffix}" for suffix in sorted(VIDEO_SUFFIXES))
-        self._onboarding_file_picker_open = True
-        self._update_action_state()
-        try:
-            selected, _ = QFileDialog.getOpenFileName(self, "Add your first file", "", f"Images and videos ({images} {videos});;Images ({images});;Videos ({videos})")
-        finally:
-            self._onboarding_file_picker_open = False
-            self._update_action_state()
-        # Native pickers run a nested event loop: Finder or a worker can
-        # change app state before the user makes a selection.
-        if not selected or self._closing or self._retry_busy():
-            return
-        path = Path(selected)
-        try:
-            if not path.is_file():
-                return
-            if path.suffix.lower() in VIDEO_SUFFIXES:
-                self.video_panel.add_sources([path])
-                index, source_list = 1, self.video_panel.source_list
-            elif path.suffix.lower() in SUPPORTED_SUFFIXES:
-                self._append_sources([path])
-                index, source_list = 0, self.source_list
-            else:
-                return
-        except (OSError, ValueError, RuntimeError) as exc:
-            self._show_message(QMessageBox.Icon.Warning, "Could not add file", f"Choose an accessible image or video and try again.\n\n{exc}")
-            return
-        self.mode_buttons[index].click()
-        self.raise_()
-        self.activateWindow()
+        source_list = self.video_panel.source_list if self.media_stack.currentIndex() else self.source_list
         source_list.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _protected_bug_paths(self) -> tuple[Path, ...]:
@@ -665,7 +625,7 @@ class ImageMagickStudio(QMainWindow):
         self.video_panel.state_changed.connect(self._update_action_state)
 
     def _open_current_mode(self) -> None:
-        if self._onboarding_page is not None or self._onboarding_file_picker_open:
+        if self._onboarding_page is not None:
             return
         if self.media_stack.currentIndex() == 1:
             self.video_panel.choose_many()
@@ -673,7 +633,7 @@ class ImageMagickStudio(QMainWindow):
             self._choose_many()
 
     def _process_current_mode(self) -> None:
-        if self._onboarding_page is not None or self._onboarding_file_picker_open:
+        if self._onboarding_page is not None:
             return
         if self.media_stack.currentIndex() == 1:
             self.video_panel.start_processing()
@@ -1256,7 +1216,7 @@ class ImageMagickStudio(QMainWindow):
         self._update_source_removal_state()
         video_panel = getattr(self, "video_panel", None)
         busy = self.processing or (video_panel is not None and video_panel.processing)
-        onboarding_active = self._onboarding_page is not None or self._onboarding_file_picker_open
+        onboarding_active = self._onboarding_page is not None
         for button in getattr(self, "mode_buttons", ()):
             button.setEnabled(not busy)
         if self.open_action:
@@ -1265,7 +1225,7 @@ class ImageMagickStudio(QMainWindow):
             can_save = video_panel.process_button.isEnabled() if video_panel is not None and self.media_stack.currentIndex() == 1 else ready
             self.save_action.setEnabled(can_save and not onboarding_active)
         if hasattr(self, "getting_started_action"):
-            self.getting_started_action.setEnabled(not self._retry_busy() and not self._onboarding_file_picker_open and not self._closing)
+            self.getting_started_action.setEnabled(not self._retry_busy() and not self._closing)
         self._update_preset_controls()
 
     def _update_source_removal_state(self) -> None:
