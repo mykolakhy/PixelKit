@@ -193,11 +193,11 @@ class _Illustration(QWidget):
 class OnboardingPage(QWidget):
     """An introduction that fills the main window's content stack.
 
-    The caller owns page removal, persistence and file selection. ``finished``
-    emits once: true for Add first file, false for Skip or Escape.
+    The caller owns page removal and persistence. ``finished`` emits once when
+    Get started, Skip or Escape completes the introduction.
     """
 
-    finished = pyqtSignal(bool)
+    finished = pyqtSignal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -377,12 +377,12 @@ class OnboardingPage(QWidget):
         title = self.page_stack.currentWidget().accessibleName()
         self.progress_label.setAccessibleName(f"Step {index + 1} of 2: {title}")
         self.page_stack.setAccessibleDescription(f"Step {index + 1} of 2. {title}")
-        self.next_button.setText("Next" if index == 0 else "Add first file…")
-        self.next_button.setShortcut(QKeySequence("Alt+N" if index == 0 else "Alt+A"))
-        self.next_button.setAccessibleName("Next: step 2" if index == 0 else "Add first file")
+        self.next_button.setText("Next" if index == 0 else "Get started")
+        self.next_button.setShortcut(QKeySequence("Alt+N" if index == 0 else "Alt+G"))
+        self.next_button.setAccessibleName("Next: step 2" if index == 0 else "Get started")
         self.next_button.setAccessibleDescription(
             "Continue to the three steps for using PixelKit."
-            if index == 0 else "Finish this introduction, then choose an image or video."
+            if index == 0 else "Finish this introduction and use PixelKit."
         )
         self.next_button.setFocus(Qt.FocusReason.OtherFocusReason)
 
@@ -399,16 +399,13 @@ class OnboardingPage(QWidget):
         if self.page_stack.currentIndex() == 0:
             self._show_page(1)
         else:
-            self._finish(True)
+            self.dismiss()
 
-    def _finish(self, add_file: bool) -> None:
+    def dismiss(self) -> None:
         if self._finished:
             return
         self._finished = True
-        self.finished.emit(add_file)
-
-    def dismiss(self) -> None:
-        self._finish(False)
+        self.finished.emit()
 
     def resizeEvent(self, event: QResizeEvent) -> None:
         super().resizeEvent(event)

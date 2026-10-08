@@ -3,16 +3,17 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QEvent, QEventLoop, QPoint, QSettings, QTimer, Qt
+from PyQt6.QtCore import QEvent, QPoint, QSettings, QTimer, Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QDialog, QPushButton
 
-from pixelkit.app import ONBOARDING_SETTINGS_KEY, SUPPORTED_SUFFIXES, ImageMagickStudio, PixelKitApplication, main
+from pixelkit.app import ONBOARDING_SETTINGS_KEY, ImageMagickStudio, PixelKitApplication, main
 from pixelkit.onboarding import OnboardingPage
 from pixelkit.presets import Preset, PresetStore
 from pixelkit.report import BatchReport
@@ -89,14 +90,33 @@ class OnboardingIntegrationTests(unittest.TestCase):
         window = window or self.window
         page = self.show_page(window=window, replay=replay)
         finished = []
-        page.finished.connect(finished.append)
-        callback(page)
-        self.app.processEvents()
+        page.finished.connect(lambda: finished.append(None))
+        with self.no_processing_or_choosers():
+            callback(page)
+            self.app.processEvents()
         self.assertIsNone(window._onboarding_page)
         self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
         self.assertTrue(window.workspace_page.isEnabled())
         self.assertEqual(window.content_stack.count(), 1)
         return finished
+
+    @contextmanager
+    def no_processing_or_choosers(self):
+        with ExitStack() as stack:
+            checks = []
+            for method, result in (
+                ("getOpenFileName", ("", "")),
+                ("getOpenFileNames", ([], "")),
+                ("getExistingDirectory", ""),
+                ("getSaveFileName", ("", "")),
+                ("exec", 0),
+            ):
+                checks.append(stack.enter_context(patch(f"pixelkit.app.QFileDialog.{method}", return_value=result)))
+            for target in ("pixelkit.app.BatchWorker", "pixelkit.video_panel.VideoWorker", "pixelkit.app.run_magick", "pixelkit.video.subprocess.Popen"):
+                checks.append(stack.enter_context(patch(target)))
+            yield
+            for check in checks:
+                check.assert_not_called()
 
     @staticmethod
     def skip(page):
@@ -106,7 +126,124 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.assertEqual(page.page_stack.currentIndex(), 0)
         QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
         self.assertEqual(page.page_stack.currentIndex(), 1)
+        self.assertEqual(page.next_button.text(), "Get started")
         QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+
+    def test_get_started_enters_empty_workspace_and_persists_without_file_side_effects(self):
+        self.assertEqual(self.run_page(self.complete), [None])
+        self.assertTrue(self.dismissed())
+        self.assertTrue(self.window._onboarding_seen_session)
+        self.assertEqual(self.window.sources, [])
+        self.assertEqual(self.window.video_panel.sources, [])
+        self.assertIsNone(self.window.worker)
+        self.assertIsNone(self.window.video_panel.worker)
+        self.assertIs(self.app.focusWidget(), self.window.source_list)
+        self.assertEqual(set(self.root.iterdir()), {self.settings_path})
+        reopened = self.make_window()
+        reopened.show()
+        reopened._maybe_show_onboarding()
+        self.assertIsNone(reopened._onboarding_page)
+        self.assertTrue(self.dismissed(reopened))
+
+    def test_completion_buttons_and_keys_preserve_existing_work_in_both_modes(self):
+        images = [self.source(f"existing-{index}.png") for index in range(2)]
+        videos = [self.source(f"existing-{index}.mov") for index in range(2)]
+        source_state = {path: (path.read_bytes(), path.stat().st_mtime_ns) for path in images + videos}
+        actions = ("button", "return", "enter", "get_started_shortcut", "skip", "escape", "skip_shortcut")
+        for mode in (0, 1):
+            for action in actions:
+                with self.subTest(mode=mode, action=action):
+                    settings_path = self.root / f"entry-{mode}-{action}.ini"
+                    store = PresetStore(QSettings(str(settings_path), QSettings.Format.IniFormat))
+                    store.save({"Saved image": Preset(quality=63, output_format="WEBP")})
+                    VideoPresetStore(store.settings).save({"Saved video": VideoSettings(preset="small", max_height=720, audio="remove")})
+                    store.settings.setValue("unrelated/preference", "keep me")
+                    store.settings.sync()
+                    saved_preferences = {key: store.settings.value(key) for key in store.settings.allKeys()}
+                    window = self.make_window(store)
+                    panel = window.video_panel
+                    window._set_sources(images)
+                    panel.set_sources(videos)
+                    window.source_list.setCurrentRow(1)
+                    panel.source_list.setCurrentRow(1)
+                    image_output = self.root / f"image-output-{mode}-{action}"
+                    video_output = self.root / f"video-output-{mode}-{action}"
+                    window.output_edit.setText(str(image_output))
+                    window.default_output = False
+                    panel.output_edit.setText(str(video_output))
+                    window.width_edit.setText("640")
+                    window.quality_slider.setValue(71)
+                    panel.preset_combo.setCurrentIndex(panel.preset_combo.findData("small"))
+                    panel.resolution_combo.setCurrentIndex(panel.resolution_combo.findData(720))
+                    panel.audio_combo.setCurrentIndex(panel.audio_combo.findData("remove"))
+                    panel.target_size_check.setChecked(True)
+                    panel.target_size_edit.setText("8.5")
+                    current_settings = window._current_preset(), panel._current_settings()
+                    reports = BatchReport((), self.root), BatchReport((), self.root)
+                    window.last_report, panel.last_report = reports
+                    panel.report_button.show()
+                    panel._update_state()
+                    window.mode_buttons[mode].click()
+                    window.resize(1300, 850)
+                    window.show()
+                    window.activateWindow()
+                    self.app.processEvents()
+                    geometry, title = window.geometry(), window.windowTitle()
+                    existing_files = set(self.root.iterdir())
+
+                    def finish(page):
+                        self.assertEqual(window.geometry(), geometry)
+                        if action == "skip":
+                            self.skip(page)
+                        elif action == "escape":
+                            page.next_button.setFocus()
+                            QTest.keyClick(page.next_button, Qt.Key.Key_Escape)
+                        elif action == "skip_shortcut":
+                            QTest.keySequence(page.next_button, QKeySequence("Alt+S"))
+                            QTest.qWait(120)
+                        else:
+                            QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+                            self.assertEqual(page.next_button.text(), "Get started")
+                            if action == "button":
+                                QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
+                            elif action == "get_started_shortcut":
+                                QTest.keySequence(page.next_button, QKeySequence("Alt+G"))
+                                QTest.qWait(120)
+                            else:
+                                key = Qt.Key.Key_Return if action == "return" else Qt.Key.Key_Enter
+                                QTest.keyClick(page.next_button, key)
+
+                    self.assertEqual(self.run_page(finish, window=window, replay=True), [None])
+                    self.assertEqual(window.sources, images)
+                    self.assertEqual(panel.sources, videos)
+                    self.assertEqual((window.source_list.currentRow(), panel.source_list.currentRow()), (1, 1))
+                    self.assertEqual(window.media_stack.currentIndex(), mode)
+                    self.assertTrue(window.mode_buttons[mode].isChecked())
+                    self.assertIs(self.app.focusWidget(), panel.source_list if mode else window.source_list)
+                    self.assertEqual((window.output_edit.text(), panel.output_edit.text()), (str(image_output), str(video_output)))
+                    self.assertFalse(window.default_output)
+                    self.assertEqual((window._current_preset(), panel._current_settings()), current_settings)
+                    self.assertIs(window.last_report, reports[0])
+                    self.assertIs(panel.last_report, reports[1])
+                    self.assertTrue(window.report_button.isEnabled())
+                    self.assertFalse(panel.report_button.isHidden())
+                    self.assertTrue(panel.report_button.isEnabled())
+                    self.assertTrue(window.process_button.isEnabled())
+                    self.assertTrue(panel.process_button.isEnabled())
+                    self.assertIsNone(window.worker)
+                    self.assertIsNone(panel.worker)
+                    self.assertFalse(window.processing)
+                    self.assertFalse(panel.processing)
+                    self.assertEqual(window.geometry(), geometry)
+                    self.assertEqual(window.windowTitle(), title)
+                    self.assertEqual(set(self.root.iterdir()), existing_files)
+                    self.assertEqual({path: (path.read_bytes(), path.stat().st_mtime_ns) for path in images + videos}, source_state)
+                    self.assertTrue(self.dismissed(window))
+                    persisted = QSettings(str(settings_path), QSettings.Format.IniFormat)
+                    persisted.sync()
+                    self.assertTrue(persisted.value(ONBOARDING_SETTINGS_KEY, False, type=bool))
+                    self.assertEqual({key: persisted.value(key) for key in persisted.allKeys() if key != ONBOARDING_SETTINGS_KEY}, saved_preferences)
+                    window.close()
 
     def test_skip_persists_across_windows_and_preserves_image_and_video_presets(self):
         image = Preset(quality=63, output_format="WEBP")
@@ -116,7 +253,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
         raw_image = self.store.settings.value(PresetStore.KEY)
         raw_video = self.store.settings.value(VideoPresetStore.KEY)
         self.store.settings.setValue("unrelated/preference", "keep me")
-        self.assertEqual(self.run_page(self.skip), [False])
+        self.assertEqual(self.run_page(self.skip), [None])
         self.assertTrue(self.dismissed())
         self.assertTrue(self.window._onboarding_seen_session)
         self.assertEqual(self.store.settings.value(PresetStore.KEY), raw_image)
@@ -136,7 +273,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
                 window = self.make_window(store)
                 with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
                     finished = self.run_page(callback, window=window)
-                self.assertEqual(finished, [False])
+                self.assertEqual(finished, [None])
                 chooser.assert_not_called()
                 self.assertTrue(self.dismissed(window))
 
@@ -211,8 +348,8 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(new_page)
         self.assertIsNot(new_page, old_page)
         with patch("pixelkit.app.QFileDialog.getOpenFileName") as chooser:
-            old_page.finished.emit(True)
-            old_page.finished.emit(False)
+            old_page.finished.emit()
+            old_page.finished.emit()
         chooser.assert_not_called()
         self.assertIs(self.window._onboarding_page, new_page)
         self.assertIs(self.window.content_stack.currentWidget(), new_page)
@@ -286,197 +423,6 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.assertEqual(tuple(control.isEnabled() for control in controls), original_enabled)
         self.assertTrue(all(button.isEnabled() for button in buttons))
 
-    def test_cancelled_final_chooser_keeps_empty_queues_and_dismissal(self):
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", return_value=("", "")) as chooser, patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            finished = self.run_page(self.complete)
-        chooser.assert_called_once()
-        self.assertEqual(finished, [True])
-        self.assertTrue(self.dismissed())
-        self.assertEqual(self.window.sources, [])
-        self.assertEqual(self.window.video_panel.sources, [])
-        image_worker.assert_not_called()
-        video_worker.assert_not_called()
-        self.assertFalse((self.root / "optimized").exists())
-
-    def test_native_picker_blocks_reentry_and_restores_actions_after_choice_or_cancel(self):
-        for select_file in (True, False):
-            with self.subTest(select_file=select_file):
-                with patch("pixelkit.app.sys.platform", "darwin"):
-                    window = self.make_window()
-                image = self.source(f"existing-{select_file}.png")
-                video = self.source(f"existing-{select_file}.mov")
-                selected = self.source(f"selected-{select_file}.png")
-                window._set_sources([image])
-                window.video_panel.set_sources([video])
-                window.show()
-                window.activateWindow()
-                self.app.processEvents()
-                errors, picker_calls = [], []
-
-                def choose(*args):
-                    picker_calls.append(args)
-                    if len(picker_calls) > 1:
-                        errors.append(AssertionError("A second onboarding file picker opened"))
-                        return "", ""
-                    loop = QEventLoop()
-
-                    def attempt_reentry():
-                        try:
-                            self.assertTrue(window._onboarding_file_picker_open)
-                            self.assertFalse(window.getting_started_action.isEnabled())
-                            self.assertFalse(window.open_action.isEnabled())
-                            self.assertFalse(window.save_action.isEnabled())
-                            window.getting_started_action.trigger()
-                            window._show_onboarding()
-                            window._choose_onboarding_file()
-                            for mode in (0, 1):
-                                window.media_stack.setCurrentIndex(mode)
-                                window.open_action.trigger()
-                                window.save_action.trigger()
-                                window._open_current_mode()
-                                window._process_current_mode()
-                            self.assertIsNone(window._onboarding_page)
-                            self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
-                            self.assertEqual(window.content_stack.count(), 1)
-                        except BaseException as error:
-                            errors.append(error)
-                        finally:
-                            loop.quit()
-
-                    QTimer.singleShot(0, attempt_reentry)
-                    loop.exec()
-                    return (str(selected), "") if select_file else ("", "")
-
-                with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose) as picker, patch("pixelkit.app.QFileDialog.getOpenFileNames", return_value=([], "")) as other_picker, patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-                    window._choose_onboarding_file()
-                if errors:
-                    raise errors[0]
-                picker.assert_called_once()
-                other_picker.assert_not_called()
-                image_worker.assert_not_called()
-                video_worker.assert_not_called()
-                self.assertFalse(window._onboarding_file_picker_open)
-                self.assertTrue(window.getting_started_action.isEnabled())
-                self.assertTrue(window.open_action.isEnabled())
-                self.assertTrue(window.save_action.isEnabled())
-                self.assertIsNone(window._onboarding_page)
-                self.assertEqual(window.sources, [image, selected] if select_file else [image])
-                self.assertEqual(window.video_panel.sources, [video])
-                self.assertIsNone(window.worker)
-                self.assertIsNone(window.video_panel.worker)
-
-    def test_picker_exception_clears_busy_flag_and_restores_actions_and_queue(self):
-        with patch("pixelkit.app.sys.platform", "darwin"):
-            window = self.make_window()
-        image = self.source("before picker exception.png")
-        window._set_sources([image])
-
-        def fail(*args):
-            self.assertTrue(window._onboarding_file_picker_open)
-            self.assertFalse(window.getting_started_action.isEnabled())
-            self.assertFalse(window.open_action.isEnabled())
-            self.assertFalse(window.save_action.isEnabled())
-            raise RuntimeError("Picker failed")
-
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=fail):
-            with self.assertRaisesRegex(RuntimeError, "Picker failed"):
-                window._choose_onboarding_file()
-        self.assertFalse(window._onboarding_file_picker_open)
-        self.assertTrue(window.getting_started_action.isEnabled())
-        self.assertTrue(window.open_action.isEnabled())
-        self.assertTrue(window.save_action.isEnabled())
-        self.assertEqual(window.sources, [image])
-        self.assertIsNone(window._onboarding_page)
-        self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
-
-    def test_final_image_and_video_choices_route_without_processing_or_media_writes(self):
-        for index, suffix in enumerate((".HEIF", ".MOV")):
-            with self.subTest(suffix=suffix):
-                source = self.source(f"first file{suffix}")
-                before = (source.read_bytes(), source.stat().st_mtime_ns)
-                window = self.make_window(PresetStore(QSettings(str(self.root / f"routing-{index}.ini"), QSettings.Format.IniFormat)))
-
-                def choose(*args):
-                    self.assertIsNone(window._onboarding_page)
-                    self.assertIs(window.content_stack.currentWidget(), window.workspace_page)
-                    self.assertIsNone(self.app.activeModalWidget())
-                    for supported in SUPPORTED_SUFFIXES | VIDEO_SUFFIXES:
-                        self.assertIn(f"*{supported}", args[3])
-                    return str(source), ""
-
-                with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-                    self.run_page(self.complete, window=window)
-                self.app.processEvents()
-                is_video = suffix.lower() in VIDEO_SUFFIXES
-                self.assertEqual(window.sources, [] if is_video else [source])
-                self.assertEqual(window.video_panel.sources, [source] if is_video else [])
-                self.assertEqual(window.media_stack.currentIndex(), int(is_video))
-                active_list = window.video_panel.source_list if is_video else window.source_list
-                self.assertIs(self.app.focusWidget(), active_list)
-                self.assertIsNone(window.worker)
-                self.assertIsNone(window.video_panel.worker)
-                image_worker.assert_not_called()
-                video_worker.assert_not_called()
-                self.assertEqual((source.read_bytes(), source.stat().st_mtime_ns), before)
-                self.assertFalse(Path(window.video_panel.output_edit.text() if is_video else window.output_edit.text()).exists())
-
-    def test_replay_appends_selected_media_and_preserves_queues_settings_and_reports(self):
-        images = [self.source(f"image-{i}.png") for i in range(3)]
-        videos = [self.source(f"video-{i}.mov") for i in range(3)]
-        self.window._set_sources(images[:2])
-        panel = self.window.video_panel
-        panel.set_sources(videos[:2])
-        image_output, video_output = self.root / "image-output", self.root / "video-output"
-        self.window.output_edit.setText(str(image_output))
-        self.window.default_output = False
-        panel.output_edit.setText(str(video_output))
-        self.window.width_edit.setText("640")
-        self.window.quality_slider.setValue(71)
-        panel.preset_combo.setCurrentIndex(panel.preset_combo.findData("small"))
-        panel.resolution_combo.setCurrentIndex(panel.resolution_combo.findData(720))
-        panel.audio_combo.setCurrentIndex(panel.audio_combo.findData("remove"))
-        image_settings, video_settings = self.window._current_preset(), panel._current_settings()
-        image_report, video_report = BatchReport((), self.root), BatchReport((), self.root)
-        self.window.last_report, panel.last_report = image_report, video_report
-        self.store.settings.setValue(ONBOARDING_SETTINGS_KEY, True)
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=[(str(images[2]), ""), (str(videos[2]), "")]), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            self.run_page(self.complete, replay=True)
-            self.run_page(self.complete, replay=True)
-        self.assertEqual(self.window.sources, images)
-        self.assertEqual(panel.sources, videos)
-        self.assertEqual(self.window.output_edit.text(), str(image_output))
-        self.assertEqual(panel.output_edit.text(), str(video_output))
-        self.assertEqual(self.window._current_preset(), image_settings)
-        self.assertEqual(panel._current_settings(), video_settings)
-        self.assertIs(self.window.last_report, image_report)
-        self.assertIs(panel.last_report, video_report)
-        image_worker.assert_not_called()
-        video_worker.assert_not_called()
-        self.assertFalse(image_output.exists())
-        self.assertFalse(video_output.exists())
-
-    def test_replay_skip_and_cancel_leave_existing_state_and_mode_unchanged(self):
-        image, video = self.source("existing.png"), self.source("existing.mov")
-        self.window._set_sources([image])
-        self.window.video_panel.set_sources([video])
-        self.window.mode_buttons[1].click()
-        self.window.quality_slider.setValue(59)
-        self.window.video_panel.audio_combo.setCurrentIndex(self.window.video_panel.audio_combo.findData("remove"))
-        outputs = self.window.output_edit.text(), self.window.video_panel.output_edit.text()
-        settings = self.window._current_preset(), self.window.video_panel._current_settings()
-        reports = BatchReport((), self.root), BatchReport((), self.root)
-        self.window.last_report, self.window.video_panel.last_report = reports
-        self.run_page(self.skip, replay=True)
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", return_value=("", "")):
-            self.run_page(self.complete, replay=True)
-        self.assertEqual(self.window.sources, [image])
-        self.assertEqual(self.window.video_panel.sources, [video])
-        self.assertEqual(self.window.media_stack.currentIndex(), 1)
-        self.assertEqual((self.window.output_edit.text(), self.window.video_panel.output_edit.text()), outputs)
-        self.assertEqual((self.window._current_preset(), self.window.video_panel._current_settings()), settings)
-        self.assertIs(self.window.last_report, reports[0])
-        self.assertIs(self.window.video_panel.last_report, reports[1])
-
     def test_existing_startup_queue_defers_without_marking_dismissal(self):
         for suffix in (".png", ".mov"):
             with self.subTest(suffix=suffix):
@@ -546,63 +492,6 @@ class OnboardingIntegrationTests(unittest.TestCase):
                     owner.processing = False
                     owner.worker = None
 
-    def test_processing_started_during_chooser_rejects_selected_file(self):
-        source = self.source("late.png")
-        for owner in (self.window, self.window.video_panel):
-            for state in ("processing", "worker"):
-                with self.subTest(owner=type(owner).__name__, state=state):
-                    def choose(*args):
-                        if state == "processing":
-                            owner.processing = True
-                        else:
-                            owner.worker = Mock()
-                            owner.worker.isRunning.return_value = True
-                        return str(source), ""
-
-                    with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose):
-                        self.window._choose_onboarding_file()
-                    self.assertEqual(self.window.sources, [])
-                    self.assertEqual(self.window.video_panel.sources, [])
-                    owner.processing = False
-                    owner.worker = None
-
-    def test_finder_files_arriving_during_chooser_are_kept_when_selection_is_added(self):
-        incoming, selected = self.source("Finder during chooser.png"), self.source("selected.png")
-
-        def choose(*args):
-            self.window.open_files([incoming])
-            return str(selected), ""
-
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose), patch("pixelkit.app.BatchWorker") as image_worker, patch("pixelkit.video_panel.VideoWorker") as video_worker:
-            self.run_page(self.complete)
-        self.assertEqual(self.window.sources, [incoming, selected])
-        self.assertEqual(self.window.video_panel.sources, [])
-        self.assertTrue(self.dismissed())
-        image_worker.assert_not_called()
-        video_worker.assert_not_called()
-
-    def test_missing_unsupported_and_directory_choices_do_not_change_queue(self):
-        original = self.source("original.png")
-        self.window._set_sources([original])
-        before_output = self.window.output_edit.text()
-        unsupported = self.source("notes.txt")
-        folder = self.root / "folder.png"
-        folder.mkdir()
-        vanished = self.source("vanished.mov")
-        for selected in (self.root / "missing.png", unsupported, folder, vanished):
-            with self.subTest(selected=selected):
-                def choose(*args):
-                    if selected == vanished:
-                        vanished.unlink()
-                    return str(selected), ""
-
-                with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose):
-                    self.window._choose_onboarding_file()
-                self.assertEqual(self.window.sources, [original])
-                self.assertEqual(self.window.video_panel.sources, [])
-                self.assertEqual(self.window.output_edit.text(), before_output)
-                self.assertFalse(self.dismissed())
-
     def test_incoming_supported_finder_files_interrupt_without_marking_completed(self):
         for index, suffix in enumerate((".png", ".MOV")):
             with self.subTest(suffix=suffix):
@@ -650,19 +539,6 @@ class OnboardingIntegrationTests(unittest.TestCase):
         self.assertFalse(self.window._onboarding_seen_session)
         self.assertFalse(self.window.isVisible())
         chooser.assert_not_called()
-
-    def test_parent_close_during_chooser_discards_selected_file(self):
-        source = self.source("late close.png")
-        self.window.show()
-
-        def choose(*args):
-            self.window.close()
-            return str(source), ""
-
-        with patch("pixelkit.app.QFileDialog.getOpenFileName", side_effect=choose):
-            self.window._choose_onboarding_file()
-        self.assertEqual(self.window.sources, [])
-        self.assertEqual(self.window.video_panel.sources, [])
 
     def test_modal_startup_warning_defers_and_retries_after_warning_closes(self):
         self.window.show()

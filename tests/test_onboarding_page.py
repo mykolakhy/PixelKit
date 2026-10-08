@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt6.QtCore import QPoint, QSettings, Qt
+from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QWidget
 
@@ -32,7 +33,7 @@ class OnboardingPageTests(unittest.TestCase):
         self.window.content_stack.addWidget(self.page)
         self.window.content_stack.setCurrentWidget(self.page)
         self.finished = []
-        self.page.finished.connect(self.finished.append)
+        self.page.finished.connect(lambda: self.finished.append(None))
         self.window.show()
         self.window.activateWindow()
         self.app.processEvents()
@@ -85,7 +86,7 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertIn("Start with your first file", self.page_text())
         for action in ("Add file", "Choose settings", "Save result"):
             self.assertIn(action, self.page_text())
-        self.assertEqual(self.page.next_button.text(), "Add first file…")
+        self.assertEqual(self.page.next_button.text(), "Get started")
         self.assertEqual(self.page.progress_label.text(), "Step 2 of 2")
         self.assertFalse(self.page.back_button.isHidden())
         self.page.back_button.click()
@@ -95,16 +96,16 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.finished, [])
         self.assertIs(self.app.focusWidget(), self.page.next_button)
 
-    def test_return_advances_and_enter_requests_a_file_once(self):
+    def test_return_advances_and_enter_completes_once(self):
         QTest.keyClick(self.page.next_button, Qt.Key.Key_Return)
         self.app.processEvents()
         self.assertEqual(self.page.page_stack.currentIndex(), 1)
         self.assertEqual(self.finished, [])
         QTest.keyClick(self.page.next_button, Qt.Key.Key_Enter)
-        self.assertEqual(self.finished, [True])
+        self.assertEqual(self.finished, [None])
         self.page.next_button.click()
         self.page.dismiss()
-        self.assertEqual(self.finished, [True])
+        self.assertEqual(self.finished, [None])
         self.assertTrue(self.window.isVisible())
 
     def test_return_activates_focused_back_or_skip_instead_of_next(self):
@@ -115,7 +116,27 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.finished, [])
         self.page.skip_button.setFocus()
         QTest.keyClick(self.page.skip_button, Qt.Key.Key_Return)
-        self.assertEqual(self.finished, [False])
+        self.assertEqual(self.finished, [None])
+
+    def test_action_shortcuts_navigate_and_get_started_once(self):
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
+        QTest.qWait(120)
+        self.assertEqual(self.page.page_stack.currentIndex(), 1)
+        self.assertEqual(self.page.next_button.shortcut(), QKeySequence("Alt+G"))
+        self.assertEqual(self.page.next_button.accessibleName(), "Get started")
+        self.assertEqual(self.page.next_button.accessibleDescription(), "Finish this introduction and use PixelKit.")
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+B"))
+        QTest.qWait(120)
+        self.assertEqual(self.page.page_stack.currentIndex(), 0)
+        self.assertEqual(self.finished, [])
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
+        QTest.qWait(120)
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
+        QTest.qWait(120)
+        self.assertEqual(self.finished, [None])
+        QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
+        QTest.qWait(120)
+        self.assertEqual(self.finished, [None])
 
     def test_return_on_the_page_itself_activates_next(self):
         self.page.setFocus()
@@ -123,7 +144,7 @@ class OnboardingPageTests(unittest.TestCase):
         self.assertEqual(self.page.page_stack.currentIndex(), 1)
         self.assertEqual(self.finished, [])
 
-    def test_skip_dismiss_and_escape_emit_false_once(self):
+    def test_skip_dismiss_and_escape_complete_once(self):
         for index, action in ((0, "skip"), (1, "skip"), (0, "escape"), (1, "escape"), (1, "dismiss")):
             with self.subTest(page=index, action=action):
                 page = OnboardingPage(self.window.content_stack)
@@ -131,7 +152,7 @@ class OnboardingPageTests(unittest.TestCase):
                 self.window.content_stack.setCurrentWidget(page)
                 page._show_page(index)
                 results = []
-                page.finished.connect(results.append)
+                page.finished.connect(lambda: results.append(None))
                 self.app.processEvents()
                 if action == "skip":
                     page.skip_button.click()
@@ -141,10 +162,10 @@ class OnboardingPageTests(unittest.TestCase):
                     QTest.keyClick(button, Qt.Key.Key_Escape)
                 else:
                     page.dismiss()
-                self.assertEqual(results, [False])
+                self.assertEqual(results, [None])
                 page.dismiss()
                 page.next_button.click()
-                self.assertEqual(results, [False])
+                self.assertEqual(results, [None])
                 self.assertTrue(self.window.isVisible())
                 self.window.content_stack.removeWidget(page)
                 page.deleteLater()
@@ -152,7 +173,7 @@ class OnboardingPageTests(unittest.TestCase):
 
     def test_finishing_does_not_hide_or_remove_content_owned_by_the_controller(self):
         self.page.dismiss()
-        self.assertEqual(self.finished, [False])
+        self.assertEqual(self.finished, [None])
         self.assertIs(self.window.content_stack.currentWidget(), self.page)
         self.assertTrue(self.page.isVisible())
 
