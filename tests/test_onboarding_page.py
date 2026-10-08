@@ -7,9 +7,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QPoint, QSettings, Qt
+from PyQt6.QtCore import QElapsedTimer, QPoint, QSettings, Qt
 from PyQt6.QtGui import QKeySequence
-from PyQt6.QtTest import QTest
+from PyQt6.QtTest import QSignalSpy, QTest
 from PyQt6.QtWidgets import QApplication, QLabel, QPushButton, QScrollArea, QWidget
 
 from pixelkit.app import ImageMagickStudio
@@ -40,6 +40,13 @@ class OnboardingPageTests(unittest.TestCase):
 
     def page_text(self):
         return " ".join(label.text() for label in self.page.page_stack.currentWidget().findChildren(QLabel))
+
+    def assert_eventually(self, condition, message):
+        timer = QElapsedTimer()
+        timer.start()
+        while not condition() and timer.elapsed() < 2000:
+            QTest.qWait(10)
+        self.assertTrue(condition(), message)
 
     def assert_contents_fit(self):
         """The introduction fills the host, and all its content fits without scrolling."""
@@ -120,22 +127,24 @@ class OnboardingPageTests(unittest.TestCase):
 
     def test_action_shortcuts_navigate_and_get_started_once(self):
         QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
-        QTest.qWait(120)
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 1, "Alt+N did not advance the introduction")
         self.assertEqual(self.page.page_stack.currentIndex(), 1)
         self.assertEqual(self.page.next_button.shortcut(), QKeySequence("Alt+G"))
         self.assertEqual(self.page.next_button.accessibleName(), "Get started")
         self.assertEqual(self.page.next_button.accessibleDescription(), "Finish this introduction and use PixelKit.")
         QTest.keySequence(self.page.next_button, QKeySequence("Alt+B"))
-        QTest.qWait(120)
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 0, "Alt+B did not return to the first page")
         self.assertEqual(self.page.page_stack.currentIndex(), 0)
         self.assertEqual(self.finished, [])
         QTest.keySequence(self.page.next_button, QKeySequence("Alt+N"))
-        QTest.qWait(120)
+        self.assert_eventually(lambda: self.page.page_stack.currentIndex() == 1, "Alt+N did not advance the introduction again")
         QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
-        QTest.qWait(120)
+        self.assert_eventually(lambda: bool(self.finished), "Alt+G did not complete the introduction")
         self.assertEqual(self.finished, [None])
+        repeated_click = QSignalSpy(self.page.next_button.clicked)
         QTest.keySequence(self.page.next_button, QKeySequence("Alt+G"))
-        QTest.qWait(120)
+        self.assert_eventually(lambda: len(repeated_click) > 0, "Repeated Alt+G did not finish its button activation")
+        self.assertEqual(len(repeated_click), 1)
         self.assertEqual(self.finished, [None])
 
     def test_return_on_the_page_itself_activates_next(self):

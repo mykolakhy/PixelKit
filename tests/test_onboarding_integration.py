@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-from PyQt6.QtCore import QEvent, QPoint, QSettings, QTimer, Qt
+from PyQt6.QtCore import QElapsedTimer, QEvent, QPoint, QSettings, QTimer, Qt
 from PyQt6.QtGui import QKeySequence
 from PyQt6.QtTest import QTest
 from PyQt6.QtWidgets import QDialog, QPushButton
@@ -65,6 +65,13 @@ class OnboardingIntegrationTests(unittest.TestCase):
     def dismissed(self, window=None):
         window = window or self.window
         return window.preset_store.settings.value(ONBOARDING_SETTINGS_KEY, False, type=bool)
+
+    def assert_eventually(self, condition, message):
+        timer = QElapsedTimer()
+        timer.start()
+        while not condition() and timer.elapsed() < 2000:
+            QTest.qWait(10)
+        self.assertTrue(condition(), message)
 
     def show_page(self, *, window=None, replay=False):
         window = window or self.window
@@ -200,7 +207,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
                             QTest.keyClick(page.next_button, Qt.Key.Key_Escape)
                         elif action == "skip_shortcut":
                             QTest.keySequence(page.next_button, QKeySequence("Alt+S"))
-                            QTest.qWait(120)
+                            self.assert_eventually(lambda: window._onboarding_page is None, "Alt+S did not restore the workspace")
                         else:
                             QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
                             self.assertEqual(page.next_button.text(), "Get started")
@@ -208,7 +215,7 @@ class OnboardingIntegrationTests(unittest.TestCase):
                                 QTest.mouseClick(page.next_button, Qt.MouseButton.LeftButton)
                             elif action == "get_started_shortcut":
                                 QTest.keySequence(page.next_button, QKeySequence("Alt+G"))
-                                QTest.qWait(120)
+                                self.assert_eventually(lambda: window._onboarding_page is None, "Alt+G did not restore the workspace")
                             else:
                                 key = Qt.Key.Key_Return if action == "return" else Qt.Key.Key_Enter
                                 QTest.keyClick(page.next_button, key)
