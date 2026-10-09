@@ -6,7 +6,7 @@ A Windows and macOS desktop app for local batch image resizing, compression, for
 
 Application bundles and installers belong in `dist/`, outside version control.
 
-- **macOS:** build a disk image using the [macOS instructions](packaging/macos/README.md), or download the matching artifact from a completed **macOS app** GitHub Actions run. Open the DMG and drag PixelKit into Applications.
+- **macOS:** download the Apple Silicon or Intel DMG from [GitHub Releases](https://github.com/mykolakhy/PixelKit/releases). Open the DMG and drag PixelKit into Applications. Development builds remain available as artifacts of completed **macOS app** GitHub Actions runs; the [macOS instructions](packaging/macos/README.md) explain building from source.
 - **Windows:** build the app and installer from the current source on Windows using the [Windows packaging instructions](packaging/windows/README.md).
 
 The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and their codecs. Apple Silicon and Intel builds are separate; the build host's macOS major version is the minimum supported version. See the packaging instructions for signing and distribution.
@@ -22,6 +22,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Drag-and-drop support for image files and folders.
 - Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
+- **Help → Check for updates…** checks the latest published stable GitHub release when you ask. It shows the installed and available versions and offers the matching macOS installer, or the release page when an installer for your system is unavailable. Downloads open in your browser; installation stays manual. There are no automatic startup checks. Offline, timeout and GitHub rate-limit errors can be retried without changing your files or settings.
 - Two short getting-started screens fill the main window on the first ordinary launch and introduce image/video processing and the add → settings → save workflow. Skip them at any time or reopen them through **Help → Getting started…**. **Get started** returns to the workspace without opening a file picker or starting processing; existing files and settings are kept. Opening a file through Finder or the command line takes priority over the introduction.
 - On macOS: native menu shortcuts and image opening through Finder's **Open With** or the Dock icon.
 - All processing is performed locally on your computer.
@@ -95,6 +96,8 @@ src/pixelkit/       Application package and bundled icons
   app.py           Main window and batch processing
   onboarding.py    First-run introduction and getting-started workflow
   onboarding_art.py Vector artwork for the welcome screen
+  updates.py       Stable release versions and matching installers
+  update_dialog.py Manual update checks and download links
   presets.py       Built-in presets and saved preferences
   runtime.py       Platform resources and ImageMagick discovery
   widgets.py       Shared dropdown widgets
@@ -114,6 +117,8 @@ pyproject.toml     Dependencies, package metadata, and launch command
 ```
 
 Dependencies are declared in `pyproject.toml`; the version is declared in `src/pixelkit/__init__.py`. `build/` contains disposable build intermediates; `dist/` contains local deliverables. Both are ignored by Git. Close any app launched from `dist/` before removing or rebuilding that bundle.
+
+To publish a macOS release, update the source version on `main`, then push a matching stable tag such as `v1.13.0`. The **macOS app** workflow builds and verifies both architectures before publishing their DMGs together in GitHub Releases. PR, branch and manual builds only upload workflow artifacts. A mismatched tag or missing installer prevents publication; existing published releases are not overwritten. Release packaging and signing requirements are described in the macOS instructions.
 
 ## Development and validation
 

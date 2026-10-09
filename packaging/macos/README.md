@@ -14,11 +14,11 @@ python3.12 -m venv .venv
 .venv/bin/python scripts/build_macos.py
 ```
 
-The builder reads the version from `src/pixelkit/__init__.py`. Pass `--version 1.2.3` to override it for a release. The builder creates:
+The builder reads the version from `src/pixelkit/__init__.py`. Pass `--version 1.2.3` to override it for a local build. Automated releases always use the source version. The builder creates:
 
 ```text
 dist/macos/arm64/PixelKit.app
-dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg
+dist/macos/arm64/PixelKit-1.13.0-macOS-arm64.dmg
 ```
 
 On Intel, the directory and disk image name use `x86_64`. Open the `.dmg` and drag **PixelKit.app** onto the **Applications** shortcut. The app supports Finder **Open With**, dropping images or MP4/MOV/M4V videos on its Dock icon, and ⌘O, ⌘S, ⌘W, and ⌘Q.
@@ -39,7 +39,21 @@ You can repeat the package checks with:
 .venv/bin/python scripts/verify_macos.py dist/macos/arm64/PixelKit.app
 ```
 
-The **macOS app** GitHub Actions workflow runs on pull requests, pushes to `main`, version tags, and manual dispatch. It uploads separate `.dmg` artifacts for Apple Silicon and Intel. Version tags must use the form `v1.2.3`; other runs use `pixelkit.__version__` from `src/pixelkit/__init__.py`. Download the artifact from the completed workflow run and extract its ZIP to get the disk image. Build outputs are ignored by Git.
+The **macOS app** GitHub Actions workflow runs on pull requests, pushes to `main`, version tags, and manual dispatch. It uploads separate `.dmg` artifacts for Apple Silicon and Intel. Download the artifact from the completed workflow run and extract its ZIP to get the disk image. Build outputs are ignored by Git.
+
+## Automatic GitHub Releases
+
+Pushing a stable version tag automatically publishes a public GitHub Release after both macOS 15 architecture builds pass their tests and package verification. The tag must use `vN.N.N` with ASCII digits and no leading zeroes, and must exactly match `__version__` in `src/pixelkit/__init__.py`: for example, `v1.13.0` requires `__version__ = "1.13.0"`. Prerelease tags, malformed tags and source mismatches fail before the build. Pull requests, branch pushes and manually dispatched builds only produce workflow artifacts.
+
+Update the source version, merge the change, then create and push that matching tag. Before pushing, the same validation can be run locally without publishing:
+
+```sh
+.venv/bin/python scripts/publish_macos_release.py --tag v1.13.0
+```
+
+The publishing job downloads the Apple Silicon and Intel artifacts from that workflow run and requires exactly the two nonempty regular files `PixelKit-<version>-macOS-arm64.dmg` and `PixelKit-<version>-macOS-x86_64.dmg`. Missing, empty, unexpected or symlinked assets prevent publication. It uses the workflow's `GITHUB_TOKEN`; only the publishing job has permission to write repository contents.
+
+The release is titled `PixelKit <version>` and includes both disk images and generated release notes. [GitHub CLI](https://cli.github.com/manual/gh_release_create) verifies that the tag already exists, stages the release as a draft while uploading its assets, then publishes it. An existing release for the tag, including a draft, causes failure; the workflow never replaces its assets. Check a failed run before retrying, including any draft left after an interrupted upload.
 
 ## Signing for distribution
 
@@ -55,12 +69,12 @@ export PIXELKIT_CODESIGN_IDENTITY='Developer ID Application: Your Name (TEAMID)'
 PyInstaller signs the embedded binaries and the app with that identity and the hardened runtime. For public distribution, submit the resulting disk image to Apple's notary service using a Keychain profile you have configured, then staple the ticket:
 
 ```sh
-xcrun notarytool submit dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg \
+xcrun notarytool submit dist/macos/arm64/PixelKit-1.13.0-macOS-arm64.dmg \
   --keychain-profile PixelKit --wait
-xcrun stapler staple dist/macos/arm64/PixelKit-1.8.0-macOS-arm64.dmg
+xcrun stapler staple dist/macos/arm64/PixelKit-1.13.0-macOS-arm64.dmg
 ```
 
-Check the notary result before publishing. The repository workflow produces ad hoc builds; it does not contain signing credentials, notarize artifacts, or publish releases.
+Check the notary result before publishing a separately signed build. Automatic GitHub Releases contain the workflow's ad hoc builds; the workflow does not contain Apple signing credentials or notarize artifacts. These public downloads retain the Gatekeeper limitation described above.
 
 FFmpeg builds with `libx264` use GPL licensing. The bundle retains the installed license files and FFmpeg version/configuration in `Contents/Resources/licenses`. Distribution also requires the corresponding source and build materials for those binaries; keeping license text alone is insufficient. See [FFmpeg's license and legal guidance](https://ffmpeg.org/legal.html).
 
