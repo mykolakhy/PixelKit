@@ -47,6 +47,7 @@ from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
 from pixelkit.retry import validate_retry_output
 from pixelkit.target_size import TARGET_FORMATS, compress_to_size
+from pixelkit.update_dialog import UpdateDialog
 from pixelkit.video import VIDEO_SUFFIXES
 from pixelkit.video_panel import VideoPanel
 from pixelkit.video_presets import VideoPresetStore
@@ -284,6 +285,7 @@ class ImageMagickStudio(QMainWindow):
         self._bug_report_dialogs: dict[tuple[str, object], BugReportDialog] = {}
         self._onboarding_page: OnboardingPage | None = None
         self._onboarding_seen_session = False
+        self._update_dialog: UpdateDialog | None = None
         self._closing = False
         self._onboarding_timer = QTimer(self)
         self._onboarding_timer.setSingleShot(True)
@@ -349,11 +351,26 @@ class ImageMagickStudio(QMainWindow):
         self.getting_started_action.setMenuRole(QAction.MenuRole.NoRole)
         self.getting_started_action.triggered.connect(self._show_onboarding)
         menu.addAction(self.getting_started_action)
+        self.check_updates_action = QAction("Check for updates…", self)
+        self.check_updates_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.check_updates_action.triggered.connect(self._show_update_check)
+        menu.addAction(self.check_updates_action)
         menu.addSeparator()
         self.report_bug_action = QAction("Report a bug…", self)
         self.report_bug_action.setMenuRole(QAction.MenuRole.NoRole)
         self.report_bug_action.triggered.connect(lambda: self._show_bug_report())
         menu.addAction(self.report_bug_action)
+
+    def _show_update_check(self) -> None:
+        if self._closing:
+            return
+        if self._update_dialog is None:
+            self._update_dialog = UpdateDialog(__version__, self)
+            self._update_dialog.checkingChanged.connect(lambda _: self._update_action_state())
+        self._update_dialog.show()
+        self._update_dialog.raise_()
+        self._update_dialog.activateWindow()
+        self._update_dialog.check_for_updates()
 
     def _maybe_show_onboarding(self) -> None:
         """Run after startup file dispatch; opening a file takes priority."""
@@ -1226,6 +1243,9 @@ class ImageMagickStudio(QMainWindow):
             self.save_action.setEnabled(can_save and not onboarding_active)
         if hasattr(self, "getting_started_action"):
             self.getting_started_action.setEnabled(not self._retry_busy() and not self._closing)
+        if hasattr(self, "check_updates_action"):
+            checking = self._update_dialog is not None and self._update_dialog.is_checking
+            self.check_updates_action.setEnabled(not self._closing and not checking)
         self._update_preset_controls()
 
     def _update_source_removal_state(self) -> None:
@@ -1467,6 +1487,9 @@ class ImageMagickStudio(QMainWindow):
             return
         self._closing = True
         self._onboarding_timer.stop()
+        if self._update_dialog is not None:
+            self._update_dialog.cancel_check()
+            self._update_dialog.close()
         self._finish_onboarding(interrupted=True)
         super().closeEvent(event)
 
