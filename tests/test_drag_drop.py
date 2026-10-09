@@ -347,6 +347,27 @@ class DragDropTests(unittest.TestCase):
         self.assertEqual(self.window.source_list.count(), 2)
         self.assertEqual(self.window.video_panel.source_list.count(), 2)
 
+    def test_drop_preserves_queued_image_replaced_by_a_symlink(self):
+        for replacement in ("self loop", "another image"):
+            with self.subTest(replacement=replacement):
+                queued = self.file(f"{replacement}/queued.png")
+                incoming = self.file(f"{replacement}/incoming.png")
+                self.window._set_sources([queued])
+                destination = self.root / replacement / "exports" / "chosen.webp"
+                self.window.output_edit.setText(str(destination))
+                self.window.default_output = False
+                queued.unlink()
+                target = queued if replacement == "self loop" else self.file(f"{replacement}/replacement.jpg")
+                queued.symlink_to(target)
+                panel = self.select_panel(1)
+                self.route_drop(panel.source_list, self.mime([incoming]))
+                self.assertEqual(self.window.sources, [queued, incoming])
+                self.assertEqual(self.window.source_list.count(), 2)
+                self.assertEqual(self.window.source_list.item(0).toolTip(), str(queued))
+                self.assertEqual(Path(self.window.output_edit.text()), destination.parent)
+                self.assertFalse(self.window.default_output)
+                self.assertEqual(self.window.media_stack.currentIndex(), 0)
+
     def test_deleted_file_is_revalidated_at_drop_before_tab_switch(self):
         source = self.file("incoming.mov")
         original_is_file = Path.is_file

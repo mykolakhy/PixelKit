@@ -1462,9 +1462,13 @@ class ImageMagickStudio(QMainWindow):
 
     def _set_sources(self, paths: list[Path], *, preserve_missing: bool = False) -> None:
         unique = list(dict.fromkeys(path.resolve() for path in paths if preserve_missing or path.is_file()))
-        self.sources = unique
+        self._replace_sources(unique)
+
+    def _replace_sources(self, sources: list[Path]) -> None:
+        """Populate an already validated queue without re-resolving old paths."""
+        self.sources = list(sources)
         self.source_list.clear()
-        for path in unique:
+        for path in self.sources:
             item = QListWidgetItem(path.name)
             item.setToolTip(str(path))
             self.source_list.addItem(item)
@@ -1555,7 +1559,7 @@ class ImageMagickStudio(QMainWindow):
         combined = list(dict.fromkeys([*previous, *incoming]))
         if combined == previous:
             return
-        self._set_sources(combined, preserve_missing=True)
+        self._replace_sources(combined)
         if previous and not automatic and destination:
             output = Path(destination)
             if len(previous) == 1 and len(combined) > 1:
