@@ -322,9 +322,16 @@ class VideoPanel(QWidget):
 
     def add_sources(self, paths: list[Path]) -> None:
         """Extend the queue without discarding an existing output folder."""
-        if self.processing:
+        if self._retry_busy():
             return
-        sources = list(dict.fromkeys(path.resolve() for path in [*self.sources, *paths] if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES))
+        incoming = []
+        for path in paths:
+            try:
+                if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
+                    incoming.append(path.resolve())
+            except (OSError, RuntimeError, ValueError):
+                continue
+        sources = list(dict.fromkeys([*self.sources, *incoming]))
         if sources == self.sources:
             return
         previous_sources = self.sources
@@ -334,7 +341,7 @@ class VideoPanel(QWidget):
         if previous_sources:
             first = previous_sources[0]
             previous_default = str(first.parent / 'optimized' if previous_batch else first.with_name(first.stem + '_optimized.mp4'))
-        self.set_sources(sources)
+        self._replace_sources(sources)
         if previous_sources and previous_output and previous_output != previous_default:
             # A single-file destination becomes a folder when a second input
             # is added. Keep its chosen parent rather than creating a folder

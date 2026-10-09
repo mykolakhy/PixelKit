@@ -19,7 +19,7 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Image compression with adjustable quality.
 - Convert between JPG, PNG, WEBP, AVIF, GIF, BMP, TIFF, and other formats supported by ImageMagick.
 - Remove EXIF and other image metadata.
-- Drag-and-drop support for image files and folders.
+- Drop images, videos or folders anywhere in the workspace. PixelKit switches to **Images** or **Video** for a single media type, appends files without clearing either queue, and ignores duplicates. A mixed image/video drop adds each type to its own queue and keeps the current tab. Folders contribute their immediate files; nested folders are skipped. Drops are disabled while processing.
 - Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
 - **Help → Check for updates…** checks the latest published stable GitHub release when you ask. It shows the installed and available versions and offers the matching macOS installer, or the release page when an installer for your system is unavailable. Downloads open in your browser; installation stays manual. There are no automatic startup checks. Offline, timeout and GitHub rate-limit errors can be retried without changing your files or settings.

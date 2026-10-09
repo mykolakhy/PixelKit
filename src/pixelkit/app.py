@@ -59,6 +59,35 @@ SUPPORTED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", 
 ONBOARDING_SETTINGS_KEY = "onboarding/dismissed"
 
 
+def local_drop_files(mime, suffixes: set[str]) -> list[Path]:
+    """Read supported local files, including immediate folder children, safely."""
+    files: list[Path] = []
+
+    def add_file(path: Path) -> None:
+        try:
+            if path.suffix.lower() in suffixes and path.is_file():
+                resolved = path.resolve()
+                if resolved.suffix.lower() in suffixes:
+                    files.append(resolved)
+        except (OSError, RuntimeError, ValueError):
+            pass
+
+    for url in mime.urls():
+        if not url.isLocalFile() or url.host() or not url.toLocalFile():
+            continue
+        path = Path(url.toLocalFile())
+        try:
+            if path.is_dir():
+                for child in sorted(path.iterdir(), key=lambda item: item.name.casefold()):
+                    add_file(child)
+            else:
+                add_file(path)
+        except (OSError, RuntimeError, ValueError):
+            # Unavailable folders must not discard other dropped files.
+            continue
+    return list(dict.fromkeys(files))
+
+
 class ElidedLabel(QLabel):
     """Keep long status text inside its layout, with the full text in a tooltip."""
     def __init__(self, text: str = "") -> None:
@@ -149,7 +178,7 @@ class DropListWidget(QListWidget):
 
     @staticmethod
     def _local_drop_paths(event) -> list[Path]:
-        return [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile() and url.toLocalFile()]
+        return [Path(url.toLocalFile()) for url in event.mimeData().urls() if url.isLocalFile() and not url.host() and url.toLocalFile()]
 
     def _accept_file_drag(self, event) -> bool:
         if self.isEnabled() and event.possibleActions() & Qt.DropAction.CopyAction:
@@ -169,16 +198,7 @@ class DropListWidget(QListWidget):
     def dropEvent(self, event) -> None:
         if not self._accept_file_drag(event):
             return
-        files: list[Path] = []
-        for path in self._local_drop_paths(event):
-            try:
-                if path.is_dir():
-                    files.extend(sorted(item for item in path.iterdir() if item.is_file() and item.suffix.lower() in self.suffixes))
-                elif path.is_file() and path.suffix.lower() in self.suffixes:
-                    files.append(path)
-            except OSError:
-                # A folder may become unreadable or disappear during a drag.
-                continue
+        files = local_drop_files(event.mimeData(), self.suffixes)
         if files:
             self.files_dropped.emit(files)
         else:
@@ -287,6 +307,8 @@ class ImageMagickStudio(QMainWindow):
         self._onboarding_seen_session = False
         self._update_dialog: UpdateDialog | None = None
         self._closing = False
+        self._drag_urls: tuple[str, ...] | None = None
+        self._drag_files: list[Path] = []
         self._onboarding_timer = QTimer(self)
         self._onboarding_timer.setSingleShot(True)
         self._onboarding_timer.timeout.connect(self._maybe_show_onboarding)
@@ -320,6 +342,8 @@ class ImageMagickStudio(QMainWindow):
             self._build_macos_menu()
         self._build_help_menu()
         self._update_action_state()
+        self.setAcceptDrops(True)
+        QApplication.instance().installEventFilter(self)
 
         if not self.magick:
             QTimer.singleShot(0, lambda: self._show_message(QMessageBox.Icon.Warning, "ImageMagick not found", missing_magick_message()))
@@ -474,6 +498,62 @@ class ImageMagickStudio(QMainWindow):
                 self.showNormal()
             self.raise_()
             self.activateWindow()
+
+    def eventFilter(self, watched, event) -> bool:
+        # Native line edits and list viewports can receive the drag before the
+        # main window. Route only this workspace, leaving other windows alone.
+        if not isinstance(watched, QWidget) or watched.window() is not self:
+            return super().eventFilter(watched, event)
+        event_type = event.type()
+        if event_type == QEvent.Type.DragLeave:
+            self._drag_urls = None
+            self._drag_files = []
+            return super().eventFilter(watched, event)
+        if event_type not in (QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            return super().eventFilter(watched, event)
+        mime = event.mimeData()
+        if not mime.hasUrls() and event.source() is not None:
+            # Internal widget drags are unrelated to importing media files.
+            return super().eventFilter(watched, event)
+        if not self._can_drop_media() or not event.possibleActions() & Qt.DropAction.CopyAction:
+            event.ignore()
+            return True
+        urls = tuple(url.toString() for url in mime.urls())
+        if event_type != QEvent.Type.DragMove or urls != self._drag_urls:
+            self._drag_urls = urls
+            self._drag_files = local_drop_files(mime, SUPPORTED_SUFFIXES | VIDEO_SUFFIXES)
+        files = self._drag_files
+        if not files:
+            event.ignore()
+            return True
+        event.setDropAction(Qt.DropAction.CopyAction)
+        event.accept()
+        if event_type == QEvent.Type.Drop:
+            # Revalidated above on drop, including files changed during the
+            # drag. Accept first; switching tabs hides the native drop target.
+            images = [path for path in files if path.suffix.lower() in SUPPORTED_SUFFIXES]
+            videos = [path for path in files if path.suffix.lower() in VIDEO_SUFFIXES]
+            if self._can_drop_media():
+                if images:
+                    self._append_sources(images)
+                if videos:
+                    self.video_panel.add_sources(videos)
+                if bool(images) != bool(videos):
+                    self.media_stack.setCurrentIndex(1 if videos else 0)
+            else:
+                event.ignore()
+            self._drag_urls = None
+            self._drag_files = []
+        return True
+
+    def _can_drop_media(self) -> bool:
+        return (
+            not self._closing
+            and self._onboarding_page is None
+            and not self._retry_busy()
+            and QApplication.activeModalWidget() is None
+            and QApplication.activePopupWidget() is None
+        )
 
     def _build_ui(self) -> None:
         self.setStyleSheet(self._stylesheet())
@@ -637,9 +717,13 @@ class ImageMagickStudio(QMainWindow):
         self.video_panel = VideoPanel(self.colors, DropListWidget(VIDEO_SUFFIXES, "videos"), self._show_message, self, preset_store=VideoPresetStore(self.preset_store.settings))
         self.media_stack.addWidget(self.video_panel)
         mode_group.idClicked.connect(self.media_stack.setCurrentIndex)
-        self.media_stack.currentChanged.connect(lambda _index: self._update_action_state())
+        self.media_stack.currentChanged.connect(self._media_mode_changed)
         self.video_panel.busy_changed.connect(lambda _busy: self._update_action_state())
         self.video_panel.state_changed.connect(self._update_action_state)
+
+    def _media_mode_changed(self, index: int) -> None:
+        self.mode_buttons[index].setChecked(True)
+        self._update_action_state()
 
     def _open_current_mode(self) -> None:
         if self._onboarding_page is not None:
@@ -1456,15 +1540,22 @@ class ImageMagickStudio(QMainWindow):
                 self._show_message(QMessageBox.Icon.Information, "No images found", "This folder does not contain supported images.")
 
     def _append_sources(self, paths: list[Path]) -> None:
-        if self.processing or (self.worker and self.worker.isRunning()):
+        if self._retry_busy():
             return
         previous = self.sources
         destination = self.output_edit.text().strip()
         automatic = self.default_output
-        combined = list(dict.fromkeys([*previous, *(path.resolve() for path in paths if path.is_file())]))
+        incoming = []
+        for path in paths:
+            try:
+                if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES:
+                    incoming.append(path.resolve())
+            except (OSError, RuntimeError, ValueError):
+                continue
+        combined = list(dict.fromkeys([*previous, *incoming]))
         if combined == previous:
             return
-        self._set_sources(combined)
+        self._set_sources(combined, preserve_missing=True)
         if previous and not automatic and destination:
             output = Path(destination)
             if len(previous) == 1 and len(combined) > 1:
