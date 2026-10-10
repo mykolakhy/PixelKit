@@ -23,6 +23,16 @@ dist/macos/arm64/PixelKit-1.13.0-macOS-arm64.dmg
 
 On Intel, the directory and disk image name use `x86_64`. Open the `.dmg` and drag **PixelKit.app** onto the **Applications** shortcut. The app supports Finder **Open With**, dropping images or MP4/MOV/M4V videos on its Dock icon, and ⌘O, ⌘S, ⌘W, and ⌘Q.
 
+The DMG opens a compact branded Finder window with PixelKit on the left, Applications on the right, and a drag-to-install instruction. Its editable background is `packaging/macos/dmg-background.svg`; the builder renders standard and Retina versions and writes the Finder layout with `dmgbuild`, without requiring Finder automation in CI. To package an existing signed bundle without rebuilding it or changing its minimum macOS version:
+
+```sh
+.venv/bin/python scripts/build_dmg.py \
+  --app dist/macos/arm64/PixelKit.app \
+  --output dist/macos/arm64/PixelKit-1.13.0-macOS-arm64.dmg
+```
+
+The builder verifies the bundle signature and the completed image. It replaces the destination only after a successful build; the source app remains unchanged.
+
 Use `--no-dmg` to create only the app. Use `--magick-prefix /path/to/imagemagick` for a custom ImageMagick installation containing `bin/magick`, `lib`, and `etc`; use `--ffmpeg-prefix /path/to/ffmpeg` for a custom installation containing `bin/ffmpeg` and `bin/ffprobe`. FFmpeg must include the `libx264` video and `aac` audio encoders. Python and both media runtimes must contain the same architecture. The normal build uses the locally installed Homebrew runtimes.
 
 Close the app before rebuilding the same bundle. If it must stay open, pass `--output-dir` with a different directory. The architecture subdirectory is added automatically. Normal builds keep only the `.app` and `.dmg`; the duplicate PyInstaller collection and disk-image staging folder are removed automatically.

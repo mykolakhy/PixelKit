@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from build_dmg import build_dmg
+
 from pixelkit import __version__
 from pixelkit.runtime import find_magick
 from pixelkit.video import find_ffmpeg
@@ -86,17 +88,8 @@ def main() -> None:
     shutil.rmtree(dist / "PixelKit")
     run([sys.executable, str(PROJECT / "scripts" / "verify_macos.py"), str(app)])
     if not args.no_dmg:
-        staging = work / "dmg"
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir()
-        run(["ditto", str(app), str(staging / app.name)])
-        (staging / "Applications").symlink_to("/Applications")
         dmg = dist / f"PixelKit-{args.version}-macOS-{arch}.dmg"
-        try:
-            run(["hdiutil", "create", "-volname", "PixelKit", "-srcfolder", str(staging), "-ov", "-format", "UDZO", str(dmg)])
-        finally:
-            shutil.rmtree(staging)
+        build_dmg(app, dmg)
         print(f"Disk image: {dmg}")
     print(f"Application: {app}")
 

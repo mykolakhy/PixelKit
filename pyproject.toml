@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["PyQt6>=6.8,<7"]
 
 [project.optional-dependencies]
-build = ["PyInstaller>=6.11,<7"]
+build = ["PyInstaller>=6.11,<7", "dmgbuild>=1.6.7,<2; sys_platform == 'darwin'"]
 
 [project.gui-scripts]
 pixelkit = "pixelkit.app:main"
