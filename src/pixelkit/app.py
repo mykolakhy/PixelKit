@@ -645,45 +645,34 @@ class ImageMagickStudio(QMainWindow):
         preset_row.addWidget(self.delete_preset_button)
         outer.addLayout(preset_row)
 
-        content = QHBoxLayout()
-        content.setSpacing(18)
-        left_content = QWidget()
-        left_content.setObjectName("leftContent")
-        left = QVBoxLayout(left_content)
-        left.setContentsMargins(0, 0, 8, 0)
-        left.setSpacing(14)
-        right_content = QWidget()
-        right_content.setObjectName("rightContent")
-        right = QVBoxLayout(right_content)
-        right.setContentsMargins(0, 0, 8, 0)
-        right.setSpacing(14)
-        left_scroll = QScrollArea()
-        left_scroll.setObjectName("leftScroll")
-        left_scroll.setWidgetResizable(True)
-        left_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        left_scroll.setWidget(left_content)
-        content.addWidget(left_scroll, 5)
-        right_scroll = QScrollArea()
-        right_scroll.setObjectName("rightScroll")
-        right_scroll.setWidgetResizable(True)
-        right_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        right_scroll.setWidget(right_content)
-        content.addWidget(right_scroll, 4)
-        outer.addLayout(content, 1)
+        image_content = QWidget()
+        image_content.setObjectName("imageContent")
+        cards = QGridLayout(image_content)
+        cards.setContentsMargins(0, 0, 8, 0)
+        cards.setHorizontalSpacing(18)
+        cards.setVerticalSpacing(10)
+        cards.setColumnStretch(0, 5)
+        cards.setColumnStretch(1, 4)
+        cards.setRowStretch(0, 1)
+        image_scroll = QScrollArea()
+        image_scroll.setObjectName("imageScroll")
+        image_scroll.setWidgetResizable(True)
+        image_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        image_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        image_scroll.setWidget(image_content)
+        outer.addWidget(image_scroll, 1)
 
         self.source_card = self._source_card()
         self.resize_card = self._resize_card()
         self.quality_card = self._quality_card()
+        self.output_card = self._output_card()
         self.source_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.resize_card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        left.addWidget(self.source_card, 1)
-        left.addWidget(self.resize_card)
-
-        right.addWidget(self.quality_card)
-        right.addWidget(self._output_card())
-        right.addStretch(1)
+        for card in (self.resize_card, self.quality_card, self.output_card):
+            card.layout().setAlignment(Qt.AlignmentFlag.AlignTop)
+        cards.addWidget(self.source_card, 0, 0)
+        cards.addWidget(self.quality_card, 0, 1)
+        cards.addWidget(self.resize_card, 1, 0)
+        cards.addWidget(self.output_card, 1, 1)
 
         footer = QHBoxLayout()
         self.status_label = ElidedLabel("Add images to get started")
@@ -1226,7 +1215,7 @@ class ImageMagickStudio(QMainWindow):
         return f"""
             QWidget {{ color: {c['text']}; font-size: 13px; }}
             QMainWindow, #page {{ background: {c['bg']}; }}
-            QWidget#leftContent, QWidget#rightContent, QScrollArea#leftScroll, QScrollArea#rightScroll {{ background: transparent; border: none; }}
+            QWidget#leftContent, QWidget#rightContent, QWidget#imageContent, QScrollArea#leftScroll, QScrollArea#rightScroll, QScrollArea#imageScroll {{ background: transparent; border: none; }}
             QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 16px; }}
             QLabel#appTitle {{ color: {c['text']}; font-size: 25px; font-weight: 700; }}
             QLabel#appVersion {{ color: {c['muted']}; font-size: 12px; font-weight: 400; }}

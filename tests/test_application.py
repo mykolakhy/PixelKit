@@ -422,6 +422,12 @@ class ApplicationTests(unittest.TestCase):
                         self.app.processEvents()
                     with self.subTest(files=len(sources), size=size, mode=mode):
                         self.assertFalse(self.window.process_button.visibleRegion().isEmpty())
+                        for first, second in ((self.window.source_card, self.window.quality_card), (self.window.resize_card, self.window.output_card)):
+                            self.assertEqual(
+                                (first.mapTo(page, first.rect().topLeft()).y(), first.mapTo(page, first.rect().bottomLeft()).y()),
+                                (second.mapTo(page, second.rect().topLeft()).y(), second.mapTo(page, second.rect().bottomLeft()).y()),
+                                "Paired cards must have matching top and bottom edges",
+                            )
                         if size[1] >= 780:
                             for column in columns:
                                 self.assertEqual(column.verticalScrollBar().maximum(), 0)
