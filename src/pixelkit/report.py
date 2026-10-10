@@ -99,6 +99,7 @@ class FileResult:
     elapsed_seconds: float | None = None
     target_bytes: int | None = None
     processing_settings: tuple[tuple[str, str], ...] = ()
+    warnings: tuple[str, ...] = ()
 
     @property
     def succeeded(self) -> bool:
@@ -176,6 +177,9 @@ class ReportDialog(QDialog):
             summary_text = f"{human_size(report.before)} → {human_size(report.after)}  ·  {size_change(report.before, report.after)}"
             if failed:
                 summary_text += f"  ·  {failed} failed"
+            notes = sum(bool(file.warnings) for file in report.successful)
+            if notes:
+                summary_text += f"  ·  {notes} with notes"
         elif report.cancelled:
             summary_text = "Processing cancelled"
         elif failed:
@@ -205,6 +209,8 @@ class ReportDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         for row, file in enumerate(report.files):
             values = [file.source.name, file.output.suffix.lstrip(".").upper(), human_size(file.before) if file.before is not None else "—", human_size(file.after) if file.succeeded else "—", size_change(file.before, file.after) if file.succeeded else "—", file.status]
+            if file.succeeded and file.warnings:
+                values[5] += " (note)"
             if video_report:
                 values.append(f"{file.elapsed_seconds:.1f} s" if file.elapsed_seconds is not None else "—")
             if limited_report:
@@ -212,6 +218,8 @@ class ReportDialog(QDialog):
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
                 item.setToolTip((_result_error_message(file) or file.error) if column == 5 and file.error else str(file.source if column == 0 else file.output))
+                if column == 5 and file.succeeded and file.warnings:
+                    item.setToolTip("\n".join(file.warnings))
                 self.table.setItem(row, column, item)
         layout.addWidget(self.table, 1)
         self.details = QPlainTextEdit()
@@ -336,8 +344,9 @@ class ReportDialog(QDialog):
             quality = f"\nQuality used: {file.quality}" if file.quality is not None else ""
             limit = f"\nLimit: {file.target_bytes / 1000000:g} MB ({file.target_bytes:,} bytes)" if file.target_bytes is not None else ""
             actual = f"\nActual size: {file.after / 1000000:g} MB ({file.after:,} bytes)" if file.target_bytes is not None and file.succeeded else ""
-            self.details.setPlainText((error or (str(file.output) + quality)) + limit + actual)
-            self.details.setToolTip(explanation or file.error or str(file.output))
+            notes = "\n\n" + "\n".join(file.warnings) if file.succeeded and file.warnings else ""
+            self.details.setPlainText((error or (str(file.output) + quality)) + limit + actual + notes)
+            self.details.setToolTip(explanation or file.error or (str(file.output) + notes))
             self.compare_button.setEnabled(file.media_type == "image" and file.succeeded and file.source.is_file() and file.output.is_file())
         else:
             self.technical_details_button.setVisible(False)
