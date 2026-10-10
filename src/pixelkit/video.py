@@ -30,6 +30,7 @@ VIDEO_PRESETS = {
     "small": (28, "medium", 96),
 }
 MP4_AUDIO_CODECS = frozenset({"aac", "mp3", "ac3", "eac3", "alac"})
+SPATIAL_AUDIO_NOTE = "Standard audio was retained. Apple spatial audio (APAC) is not included in the MP4."
 MAX_TARGET_ATTEMPTS = 5
 
 
@@ -147,7 +148,9 @@ def probe_video(source: Path, ffprobe: str, cancelled: Callable[[], bool] = lamb
     # channel, including paletted inputs which may carry alpha in their palette.
     if pixel_format == "pal8" or pixel_format.startswith(("rgba", "argb", "bgra", "abgr", "yuva", "gbrap", "ya", "ayuv", "vuya", "uyva")):
         raise ValueError("Video transparency is not supported yet. Export an opaque video before compressing it to MP4.")
-    codecs = tuple(str(stream.get("codec_name", "")) for stream in streams if stream.get("codec_type") == "audio")
+    # Older ffprobe versions identify Apple's spatial track only by its MOV
+    # tag. Marian's unrelated 'apac' decoder cannot decode this Apple format.
+    codecs = tuple("apple_apac" if stream.get("codec_tag_string") == "apac" else str(stream.get("codec_name", "")) for stream in streams if stream.get("codec_type") == "audio")
     return VideoInfo(duration, stream_index, width, height, codecs)
 
 
@@ -174,11 +177,18 @@ def video_command(ffmpeg: str, source: Path, output: Path, settings: VideoSettin
     if settings.audio == "remove":
         command.append("-an")
     elif info.audio_codecs:
-        command.extend(("-map", "0:a?"))
+        # iPhone MOV files can contain both standard AAC and an additional
+        # Apple spatial track without an FFmpeg decoder. Retain the standard
+        # tracks explicitly, preserving their input order and output indexes.
+        tracks = [(index, codec) for index, codec in enumerate(info.audio_codecs) if codec != "apple_apac"]
+        if not tracks:
+            raise ValueError("This video has only Apple spatial audio (APAC), which PixelKit cannot convert yet. Choose Remove audio, or export a version with standard AAC audio. No output was saved.")
+        for index, _ in tracks:
+            command.extend(("-map", f"0:a:{index}"))
         if settings.audio == "compress":
             command.extend(("-c:a", "aac", "-b:a", f"{bitrate}k"))
         else:
-            for index, codec in enumerate(info.audio_codecs):
+            for index, (_, codec) in enumerate(tracks):
                 command.extend((f"-c:a:{index}", "copy" if codec in MP4_AUDIO_CODECS else "aac"))
                 if codec not in MP4_AUDIO_CODECS:
                     command.extend((f"-b:a:{index}", "192k"))
@@ -343,6 +353,7 @@ class VideoWorker(QThread):
                 continue
             started = time.monotonic()
             before = after = None
+            warnings = ()
             error = stopped = None
             temporary_dir = None
             self.encoding_progress.emit(0, source.name)
@@ -379,6 +390,8 @@ class VideoWorker(QThread):
                     raise ValueError("No size reduction with these settings. The original may already be optimized; try Smallest size or a lower resolution. No output was saved.")
                 temporary.replace(output)
                 after = encoded_size
+                if self.settings.audio != "remove" and "apple_apac" in info.audio_codecs:
+                    warnings = (SPATIAL_AUDIO_NOTE,)
                 self.encoding_progress.emit(100, source.name)
             except ProcessingCancelled:
                 error = "Processing cancelled. No partial output was saved."
@@ -391,6 +404,6 @@ class VideoWorker(QThread):
                         shutil.rmtree(temporary_dir)
                     except OSError as exc:
                         error = f"{error or 'Compression completed.'}\nCould not remove temporary files at {temporary_dir}: {exc}"
-            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes, processing_settings=processing_settings))
+            files.append(FileResult(source, output, before, after, error, stopped, media_type="video", elapsed_seconds=time.monotonic() - started, target_bytes=self.settings.target_bytes, processing_settings=processing_settings, warnings=warnings))
             self.progress.emit(index, len(self.jobs), source.name)
         self.finished.emit(BatchReport(tuple(files), self.output_dir, any(file.stopped for file in files), retry_settings=self.settings))

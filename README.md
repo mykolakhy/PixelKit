@@ -40,6 +40,8 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 
 Switch to **Video**, add MP4, MOV or M4V files (or drop a folder), then choose **High quality**, **Balanced**, or **Smallest file**. Output is MP4 with H.264 video; select original resolution, up to 1080p, or up to 720p. Aspect ratio is preserved without enlarging smaller videos. Choose to keep audio, compress it, or remove it. Keep audio copies compatible tracks; incompatible audio is converted to high-quality AAC.
 
+iPhone videos with both standard audio and Apple spatial audio (APAC) retain the standard tracks. The report notes that spatial audio is not included in the MP4. Videos with only APAC audio require **Remove audio** or an export with standard AAC audio.
+
 Select a queued video and click **Remove**, or press **Delete / Backspace** while its list has focus, to remove that video only. **Clear all** empties the queue. Original files stay on disk, and the queue cannot be changed during processing.
 
 Choose an output file for one video or an output folder for a batch. Batch outputs receive unique filenames. Processing displays progress, supports cancellation, and preserves completed videos. The report includes sizes, savings, errors and elapsed time; **View last report** reopens it. Originals remain intact and partial files are removed. Results that would be larger than or equal to the input are reported without replacing the destination.

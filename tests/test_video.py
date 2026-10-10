@@ -70,6 +70,58 @@ class VideoTests(VideoTestBase):
         self.assertEqual(command[command.index("-c:a:1") + 1], "aac")
         self.assertEqual(command[command.index("-b:a:1") + 1], "192k")
 
+    def test_probe_recognizes_apple_spatial_audio_in_old_and_new_ffprobe(self):
+        for audio in ({"codec_name": "apple_apac"}, {"codec_tag_string": "apac"}, {"codec_name": "none", "codec_tag_string": "apac"}):
+            metadata = self.metadata()
+            metadata["streams"].extend(({"index": 1, "codec_type": "audio", **audio}, {"index": 3, "codec_type": "audio", "codec_name": "aac"}))
+            with self.subTest(audio=audio), patch("pixelkit.video._run_captured", return_value=subprocess.CompletedProcess([], 0, json.dumps(metadata), "")):
+                self.assertEqual(probe_video(self.root / "iphone.mov", "ffprobe").audio_codecs, ("apple_apac", "aac"))
+
+    def test_spatial_audio_is_excluded_without_losing_other_tracks_or_codec_indexes(self):
+        for codecs, maps in ((("apple_apac", "aac", "pcm_s16le"), ["0:0", "0:a:1", "0:a:2"]), (("aac", "apple_apac", "pcm_s16le"), ["0:0", "0:a:0", "0:a:2"]), (("aac", "pcm_s16le", "apple_apac"), ["0:0", "0:a:0", "0:a:1"])):
+            for audio in ("keep", "compress"):
+                with self.subTest(codecs=codecs, audio=audio):
+                    command = video_command("ffmpeg", self.root / "in.mov", self.root / "out.mp4", VideoSettings(audio=audio), VideoInfo(2, 0, 320, 180, codecs))
+                    self.assertEqual([command[index + 1] for index, value in enumerate(command) if value == "-map"], maps)
+                    if audio == "keep":
+                        self.assertEqual(command[command.index("-c:a:0") + 1], "copy")
+                        self.assertEqual(command[command.index("-c:a:1") + 1], "aac")
+                    else:
+                        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+
+    def test_apac_only_audio_requires_explicit_remove_choice(self):
+        info = VideoInfo(2, 0, 320, 180, ("apple_apac",))
+        for audio in ("keep", "compress"):
+            with self.subTest(audio=audio), self.assertRaisesRegex(ValueError, "only Apple spatial audio.*Remove audio"):
+                video_command("ffmpeg", self.root / "in.mov", self.root / "out.mp4", VideoSettings(audio=audio), info)
+        command = video_command("ffmpeg", self.root / "in.mov", self.root / "out.mp4", VideoSettings(audio="remove"), info)
+        self.assertIn("-an", command)
+        self.assertNotIn("0:a:0", command)
+
+    def test_unrelated_or_unknown_audio_codecs_are_not_silently_dropped(self):
+        metadata = self.metadata()
+        metadata["streams"].extend(({"index": 1, "codec_type": "audio", "codec_name": "apac", "codec_tag_string": "APAC"}, {"index": 2, "codec_type": "audio"}))
+        with patch("pixelkit.video._run_captured", return_value=subprocess.CompletedProcess([], 0, json.dumps(metadata), "")):
+            info = probe_video(self.root / "other.mov", "ffprobe")
+        self.assertEqual(info.audio_codecs, ("apac", ""))
+        command = video_command("ffmpeg", self.root / "in.mov", self.root / "out.mp4", VideoSettings(), info)
+        self.assertIn("0:a:0", command)
+        self.assertIn("0:a:1", command)
+
+    def test_apac_only_failure_preserves_existing_destination_and_original(self):
+        source, output = self.root / "iphone.mov", self.root / "iphone.mp4"
+        source.write_bytes(b"original video")
+        output.write_bytes(b"existing output")
+        with patch("pixelkit.video.find_ffmpeg", return_value="ffmpeg"), patch("pixelkit.video.find_ffprobe", return_value="ffprobe"), patch("pixelkit.video._run_captured", return_value=subprocess.CompletedProcess([], 0, " V....D libx264 encoder", "")), patch("pixelkit.video.probe_video", return_value=VideoInfo(2, 0, 320, 180, ("apple_apac",))), patch("pixelkit.video.encode_video") as encode:
+            report = self.run_worker([(source, output)])
+        self.assertFalse(report.files[0].succeeded)
+        self.assertIn("only Apple spatial audio", report.files[0].error)
+        self.assertEqual(report.files[0].warnings, ())
+        encode.assert_not_called()
+        self.assertEqual(output.read_bytes(), b"existing output")
+        self.assertEqual(source.read_bytes(), b"original video")
+        self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
+
     def test_cancelled_batch_preserves_completed_and_existing_outputs(self):
         jobs = []
         for index in range(3):
@@ -208,6 +260,39 @@ class RealVideoTests(VideoTestBase):
         self.assertEqual((info.width, info.height), (320, 180))
         self.assertEqual(info.audio_codecs, ("aac",))
         self.assertAlmostEqual(info.duration, 1.5, places=1)
+
+    def test_real_mov_with_spatial_track_retains_standard_audio_in_all_modes(self):
+        source = self.root / "spatial audio.mov"
+        subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x180:rate=12:duration=2", "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=48000:duration=2", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "qtrle", "-c:a", "aac", "-b:a", "64k", str(source)], check=True, capture_output=True, timeout=30)
+        # Mark the first audio sample entry as Apple's unsupported APAC. Its
+        # payload must never be decoded; the second track is ordinary AAC.
+        contents = source.read_bytes()
+        tag = contents.index(b"mp4a", contents.index(b"moov"))
+        source.write_bytes(contents[:tag] + b"apac" + contents[tag + 4:])
+        original = hashlib.sha256(source.read_bytes()).digest()
+        self.assertEqual(probe_video(source, find_ffprobe()).audio_codecs, ("apple_apac", "aac"))
+
+        def audio_hash(path, track):
+            return subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", str(path), "-map", f"0:a:{track}", "-c", "copy", "-f", "hash", "-hash", "sha256", "-"], check=True, capture_output=True, timeout=30).stdout.strip()
+
+        for audio, target in (("compress", None), ("keep", None), ("remove", None), ("keep", 35000)):
+            with self.subTest(audio=audio, target=target):
+                output = self.root / f"{audio}-{target}.mp4"
+                report = self.run_worker([(source, output)], VideoSettings(audio=audio, target_bytes=target))
+                file = report.files[0]
+                self.assertTrue(file.succeeded, file.error)
+                self.assertEqual(file.status, "Done")
+                self.assertEqual(bool(file.warnings), audio != "remove")
+                info = probe_video(output, find_ffprobe())
+                self.assertEqual(info.audio_codecs, () if audio == "remove" else ("aac",))
+                self.assertAlmostEqual(info.duration, 2, places=1)
+                if audio == "keep":
+                    self.assertEqual(audio_hash(source, 1), audio_hash(output, 0))
+                if target:
+                    self.assertLessEqual(output.stat().st_size, target)
+                subprocess.run([find_ffmpeg(), "-hide_banner", "-loglevel", "error", "-xerror", "-i", str(output), "-f", "null", "-"], check=True, capture_output=True, timeout=30)
+        self.assertEqual(hashlib.sha256(source.read_bytes()).digest(), original)
+        self.assertEqual(list(self.root.glob(".pixelkit-video-*")), [])
 
     def test_real_remove_audio_and_do_not_upscale(self):
         source, output = self.root / "source.mov", self.root / "small.mp4"

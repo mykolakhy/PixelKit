@@ -41,6 +41,23 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(size_change(100, 100), "No change")
         self.assertEqual(size_change(0, 1), "—")
 
+    def test_successful_video_note_is_visible_without_becoming_a_failure(self):
+        note = "Standard audio was retained. Apple spatial audio (APAC) is not included in the MP4."
+        file = FileResult(self.root / "iphone.mov", self.root / "iphone.mp4", 1000, 300, media_type="video", warnings=(note,))
+        report = BatchReport((file,), self.root, retry_settings=VideoSettings())
+        dialog = ReportDialog(report)
+        self.addCleanup(dialog.close)
+        self.assertEqual(report.successful, (file,))
+        self.assertEqual(report.failed, ())
+        self.assertEqual(dialog.table.item(0, 5).text(), "Done (note)")
+        self.assertEqual(dialog.table.item(0, 5).toolTip(), note)
+        self.assertIn(note, dialog.details.toPlainText())
+        self.assertIn(str(file.output), dialog.details.toPlainText())
+        self.assertIn("1 with notes", dialog.findChild(QLabel, "reportSummary").text())
+        self.assertTrue(dialog.copy_error_button.isHidden())
+        self.assertTrue(dialog.report_bug_button.isHidden())
+        self.assertTrue(dialog.retry_button.isHidden())
+
     def test_completion_status_distinguishes_failures_successes_and_cancellation(self):
         good = FileResult(self.root / "one.png", self.root / "one.webp", 100, 40)
         bad = FileResult(self.root / "bad.png", self.root / "bad.webp", 100, None, "Encoding failed")
