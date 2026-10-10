@@ -570,7 +570,10 @@ class OnboardingIntegrationTests(unittest.TestCase):
             self.assertIsNone(self.window._onboarding_page)
             self.assertFalse(self.dismissed())
             QTimer.singleShot(10, warning.reject)
-            QTest.qWait(220)
+            self.assert_eventually(
+                lambda: isinstance(self.window._onboarding_page, OnboardingPage),
+                "Onboarding did not open after the startup warning closed",
+            )
             page = self.window._onboarding_page
             self.assertIsInstance(page, OnboardingPage)
             self.assertIs(self.window.content_stack.currentWidget(), page)
