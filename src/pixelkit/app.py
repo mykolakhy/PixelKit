@@ -652,7 +652,7 @@ class ImageMagickStudio(QMainWindow):
         self.mode_buttons[0].setChecked(True)
         mode_row.addStretch()
         quick_controls_widget = QWidget()
-        quick_controls_widget.setFixedWidth(280)
+        quick_controls_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         quick_controls = QHBoxLayout(quick_controls_widget)
         quick_controls.setContentsMargins(0, 0, 0, 0)
         quick_controls.setSpacing(8)
@@ -672,7 +672,6 @@ class ImageMagickStudio(QMainWindow):
         self.quick_info.clicked.connect(lambda: QToolTip.showText(
             self.quick_info.mapToGlobal(self.quick_info.rect().bottomLeft()), self.quick_info.toolTip(), self.quick_info))
         quick_controls.addWidget(self.quick_info)
-        quick_controls.addStretch()
         quick_controls.addWidget(self.quick_switch)
         mode_row.addWidget(quick_controls_widget)
         outer.addLayout(mode_row)
