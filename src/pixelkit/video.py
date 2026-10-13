@@ -20,6 +20,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 from pixelkit.report import BatchReport, FileResult
 from pixelkit.runtime import ProcessingCancelled, resource_roots
+from pixelkit.quick_processing import publish_output
 
 
 VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v"})
@@ -323,9 +324,10 @@ class VideoWorker(QThread):
     encoding_progress = pyqtSignal(int, str)
     finished = pyqtSignal(object)
 
-    def __init__(self, jobs: list[tuple[Path, Path]], output_dir: Path, settings: VideoSettings) -> None:
+    def __init__(self, jobs: list[tuple[Path, Path]], output_dir: Path, settings: VideoSettings, *, overwrite: bool = True) -> None:
         super().__init__()
         self.jobs = [(Path(source), Path(output)) for source, output in jobs]
+        self.overwrite = overwrite
         self.output_dir = Path(output_dir)
         self.settings = settings
         self.cancel_event = Event()
@@ -388,7 +390,7 @@ class VideoWorker(QThread):
                     raise _limit_error(self.settings.target_bytes)
                 if encoded_size >= before:
                     raise ValueError("No size reduction with these settings. The original may already be optimized; try Smallest size or a lower resolution. No output was saved.")
-                temporary.replace(output)
+                publish_output(temporary, output, overwrite=self.overwrite)
                 after = encoded_size
                 if self.settings.audio != "remove" and "apple_apac" in info.audio_codecs:
                     warnings = (SPATIAL_AUDIO_NOTE,)

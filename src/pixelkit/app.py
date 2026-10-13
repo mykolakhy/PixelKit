@@ -5,11 +5,12 @@ import shutil
 import sys
 import tempfile
 from dataclasses import replace
+from collections import deque
 from threading import Event
 from pathlib import Path
 
-from PyQt6.QtCore import QEvent, QLocale, QSettings, QThread, QTimer, Qt, QSize, pyqtSignal
-from PyQt6.QtGui import QAction, QIcon, QImageReader, QIntValidator, QKeySequence
+from PyQt6.QtCore import QEvent, QLocale, QSettings, QThread, QTimer, Qt, QSize, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QDesktopServices, QIcon, QImageReader, QIntValidator, QKeySequence
 from PyQt6.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -43,12 +44,13 @@ from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.onboarding import OnboardingPage
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
 from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
-from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
+from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox, QuickDestination, ToggleSwitch
+from pixelkit.quick_processing import ENABLED_KEY, FOLDER_KEY, QuickBatch, publish_output, unique_outputs
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
 from pixelkit.retry import validate_retry_output
 from pixelkit.target_size import TARGET_FORMATS, compress_to_size
 from pixelkit.update_dialog import UpdateDialog
-from pixelkit.video import VIDEO_SUFFIXES
+from pixelkit.video import VIDEO_SUFFIXES, VideoWorker
 from pixelkit.video_panel import VideoPanel
 from pixelkit.video_presets import VideoPresetStore
 
@@ -215,13 +217,14 @@ class BatchWorker(QThread):
     progress = pyqtSignal(int, int, str)
     finished = pyqtSignal(object)
 
-    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path, target_bytes: int | None = None, *, retry_settings: Preset | None = None) -> None:
+    def __init__(self, jobs: list[tuple[list[str], Path]], output_dir: Path, target_bytes: int | None = None, *, retry_settings: Preset | None = None, overwrite: bool = True) -> None:
         super().__init__()
         self.jobs = jobs
         self.output_dir = output_dir
         self.cancel_event = Event()
         self.target_bytes = target_bytes
         self.retry_settings = retry_settings
+        self.overwrite = overwrite
 
     def cancel(self) -> None:
         self.cancel_event.set()
@@ -270,7 +273,7 @@ class BatchWorker(QThread):
                     raise ProcessingCancelled()
                 if result.returncode == 0 and temporary.is_file():
                     after = temporary.stat().st_size
-                    temporary.replace(output)
+                    publish_output(temporary, output, overwrite=self.overwrite)
                 else:
                     error = result.stderr.strip() or result.stdout.strip() or "ImageMagick returned an unknown error."
             except ProcessingCancelled:
@@ -314,6 +317,16 @@ class ImageMagickStudio(QMainWindow):
         self._onboarding_timer.timeout.connect(self._maybe_show_onboarding)
         self.field_errors: dict[QLineEdit, QLabel] = {}
         self.preset_store = preset_store if preset_store is not None else PresetStore()
+        stored_quick = self.preset_store.settings.value(ENABLED_KEY, False)
+        self.quick_enabled = stored_quick is True or (isinstance(stored_quick, str) and stored_quick.casefold() in {"true", "1"})
+        self.quick_folder = str(self.preset_store.settings.value(FOLDER_KEY, "") or "")
+        self._quick_pending: deque[QuickBatch] = deque()
+        self._quick_active: QuickBatch | None = None
+        self._quick_reports: dict[str, BatchReport] = {}
+        self._quick_cancelled_manual: str | None = None
+        self._quick_timer = QTimer(self)
+        self._quick_timer.setSingleShot(True)
+        self._quick_timer.timeout.connect(self._start_next_quick_batch)
         self.custom_presets = self.preset_store.load()
         self.applying_preset = False
         self.colors = {
@@ -335,6 +348,14 @@ class ImageMagickStudio(QMainWindow):
         self._build_ui()
         self._set_sources([])
         self._connect_preset_changes()
+        self.quick_switch.toggled.connect(self._quick_toggled)
+        self.quick_destination.changed.connect(self._quick_destination_changed)
+        self.video_panel.quick_destination.changed.connect(self._quick_destination_changed)
+        self.video_panel.batch_finished.connect(self._video_batch_finished)
+        self.video_panel.cancel_requested.connect(self._cancel_quick_pending)
+        self.video_panel.quick_start = lambda: self._queue_quick_drop(list(self.video_panel.sources))
+        self.video_panel.open_output_button.clicked.connect(lambda: self._open_quick_output(self.video_panel.last_report))
+        self._update_quick_ui()
         if self.preset_store.load_error:
             self._set_status("Saved presets could not be loaded; built-in presets are available.")
 
@@ -458,6 +479,8 @@ class ImageMagickStudio(QMainWindow):
         for report in (self.last_report, self.video_panel.last_report):
             if report is not None:
                 paths.extend(path for file in report.files for path in (file.source, file.output))
+        for batch in self._quick_pending:
+            paths.extend((*batch.sources, *batch.outputs))
         for edit in (self.output_edit, self.video_panel.output_edit):
             if edit.text().strip():
                 try:
@@ -534,12 +557,15 @@ class ImageMagickStudio(QMainWindow):
             images = [path for path in files if path.suffix.lower() in SUPPORTED_SUFFIXES]
             videos = [path for path in files if path.suffix.lower() in VIDEO_SUFFIXES]
             if self._can_drop_media():
-                if images:
-                    self._append_sources(images)
-                if videos:
-                    self.video_panel.add_sources(videos)
-                if bool(images) != bool(videos):
-                    self.media_stack.setCurrentIndex(1 if videos else 0)
+                if self.quick_enabled:
+                    self._queue_quick_drop(files)
+                else:
+                    if images:
+                        self._append_sources(images)
+                    if videos:
+                        self.video_panel.add_sources(videos)
+                    if bool(images) != bool(videos):
+                        self.media_stack.setCurrentIndex(1 if videos else 0)
             else:
                 event.ignore()
             self._drag_urls = None
@@ -550,7 +576,7 @@ class ImageMagickStudio(QMainWindow):
         return (
             not self._closing
             and self._onboarding_page is None
-            and not self._retry_busy()
+            and (self.quick_enabled or not self._retry_busy())
             and QApplication.activeModalWidget() is None
             and QApplication.activePopupWidget() is None
         )
@@ -566,7 +592,7 @@ class ImageMagickStudio(QMainWindow):
         self.content_stack.addWidget(page)
         outer = QVBoxLayout(page)
         outer.setContentsMargins(30, 26, 30, 20)
-        outer.setSpacing(18)
+        outer.setSpacing(14)
 
         header = QHBoxLayout()
         header.setSpacing(14)
@@ -618,6 +644,26 @@ class ImageMagickStudio(QMainWindow):
             self.mode_buttons.append(button)
         self.mode_buttons[0].setChecked(True)
         mode_row.addStretch()
+        quick_controls_widget = QWidget()
+        quick_controls_widget.setFixedWidth(280)
+        quick_controls = QVBoxLayout(quick_controls_widget)
+        quick_controls.setContentsMargins(0, 0, 0, 0)
+        quick_controls.setSpacing(1)
+        quick_title = QHBoxLayout()
+        quick_title.setSpacing(10)
+        quick_label = QLabel("Quick processing")
+        self.quick_switch = ToggleSwitch(self.colors)
+        self.quick_switch.setChecked(self.quick_enabled)
+        quick_label.setBuddy(self.quick_switch)
+        quick_title.addWidget(quick_label)
+        quick_title.addStretch()
+        quick_title.addWidget(self.quick_switch)
+        quick_controls.addLayout(quick_title)
+        self.quick_hint = ElidedLabel()
+        self.quick_hint.setMinimumHeight(14)
+        self.quick_hint.setObjectName("quickHint")
+        quick_controls.addWidget(self.quick_hint)
+        mode_row.addWidget(quick_controls_widget)
         outer.addLayout(mode_row)
         self.media_stack = QStackedWidget()
         outer.addWidget(self.media_stack, 1)
@@ -692,6 +738,10 @@ class ImageMagickStudio(QMainWindow):
         self.report_button.setEnabled(False)
         self.report_button.clicked.connect(self._show_last_report)
         footer.addWidget(self.report_button)
+        self.open_output_button = QPushButton("Open output folder")
+        self.open_output_button.hide()
+        self.open_output_button.clicked.connect(lambda: self._open_quick_output(self.last_report))
+        footer.addWidget(self.open_output_button)
         self.process_button = QPushButton("Process and save")
         self.process_button.setObjectName("primaryButton")
         self.process_button.setMinimumHeight(46)
@@ -712,6 +762,230 @@ class ImageMagickStudio(QMainWindow):
     def _media_mode_changed(self, index: int) -> None:
         self.mode_buttons[index].setChecked(True)
         self._update_action_state()
+
+    def _quick_toggled(self, enabled: bool) -> None:
+        self.quick_enabled = enabled
+        self.preset_store.settings.setValue(ENABLED_KEY, enabled)
+        self.preset_store.settings.sync()
+        self._update_quick_ui()
+        if self.preset_store.settings.status() != QSettings.Status.NoError:
+            self.quick_hint.setText("Mode changed; preferences could not be saved.")
+
+    def _quick_destination_changed(self, folder: str) -> None:
+        self.quick_folder = folder
+        self.preset_store.settings.setValue(FOLDER_KEY, folder)
+        self.preset_store.settings.sync()
+        self._update_quick_ui()
+
+    def _update_quick_ui(self) -> None:
+        for panel in (self, self.video_panel):
+            if panel is self.video_panel:
+                panel.quick_mode = self.quick_enabled
+            panel.manual_output_row.setVisible(not self.quick_enabled)
+            panel.quick_destination.setVisible(self.quick_enabled)
+            panel.quick_destination.set_folder(self.quick_folder)
+            report = panel.last_report
+            panel.open_output_button.setVisible(bool(report and report.successful) and (self.quick_enabled or bool(self._quick_reports)))
+            panel.open_output_button.setEnabled(bool(report and report.successful))
+            placeholder = panel.source_list.placeholder
+            placeholder.setText("Drop images or videos to start\nThe right settings are applied automatically" if self.quick_enabled else
+                                f"Drop {'images' if panel is self else 'videos'} or folders here\nor use the file selection buttons")
+            panel.source_list.setAccessibleDescription(placeholder.text().replace("\n", ". "))
+            panel.source_list.setProperty("quickProcessing", self.quick_enabled)
+            panel.source_list.style().unpolish(panel.source_list)
+            panel.source_list.style().polish(panel.source_list)
+        self.output_note.setText("New files use the suffix _optimized. Originals stay unchanged." if self.quick_enabled else "The file extension follows the selected format.")
+        if not self.sources and not self.processing and self.last_report is None:
+            self._set_status("Quick processing is on · Drop files to start" if self.quick_enabled else "Add images to get started")
+        if not self.video_panel.sources and not self.video_panel.processing and self.video_panel.last_report is None and self.video_panel.available:
+            self.video_panel.status.setText("Quick processing is on · Drop files to start" if self.quick_enabled else "Add videos to get started")
+        waiting = sum(len(batch.sources) for batch in self._quick_pending)
+        self.video_panel.quick_jobs_waiting = bool(self._quick_pending)
+        if self._quick_active:
+            self.quick_hint.setText(f"Processing · {waiting} file(s) waiting" if waiting else "Processing · Drop more files to queue them")
+        elif self.quick_enabled:
+            self.quick_hint.setText("Starts automatically when you drop files")
+        else:
+            self.quick_hint.setText("Review settings, then start processing")
+        self.quick_switch.setToolTip("Only dropped files start automatically. Turning this off keeps already queued jobs. Use Cancel processing to stop the queue.")
+        self._update_action_state()
+
+    def _open_quick_output(self, report: BatchReport | None) -> None:
+        if report and report.successful:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(report.successful[0].output.parent)))
+
+    def _queue_quick_drop(self, files: list[Path]) -> None:
+        """Snapshot only this drop; existing manual selections do not auto-run."""
+        queued = {source for batch in self._quick_pending for source in batch.sources}
+        if self._quick_active:
+            queued.update(self._quick_active.sources)
+        if self.processing and self.worker:
+            queued.update(Path(command[1]) for command, output in self.worker.jobs)
+        if self.video_panel.processing and self.video_panel.worker:
+            queued.update(source for source, output in self.video_panel.worker.jobs)
+        incoming = [path for path in files if path not in queued]
+        if not incoming:
+            return
+        if self._quick_active is None and not self._quick_pending:
+            self._quick_reports.clear()
+        protected = [*self.sources, *self.video_panel.sources, *incoming]
+        for batch in [*self._quick_pending, *([self._quick_active] if self._quick_active else [])]:
+            protected.extend(batch.outputs)
+        groups: dict[str, list[Path]] = {}
+        for path in incoming:
+            groups.setdefault("video" if path.suffix.lower() in VIDEO_SUFFIXES else "image", []).append(path)
+        for media, sources in groups.items():
+            panel = self.video_panel if media == "video" else self
+            previous_count = len(panel.sources)
+            destination = panel.output_edit.text().strip()
+            automatic = self.default_output if panel is self else not destination or destination == panel._default_output()
+            for path in sources:
+                if path not in panel.sources:
+                    panel.sources.append(path)
+                    item = QListWidgetItem(path.name)
+                    item.setToolTip(str(path))
+                    panel.source_list.addItem(item)
+            panel.source_list.placeholder.setVisible(False)
+            panel.source_info.setText(f"{len(panel.sources)} {'videos' if media == 'video' else 'images'}")
+            if panel is self:
+                self._update_output_mode()
+                if automatic:
+                    self._set_default_output()
+            else:
+                panel.output_edit.setPlaceholderText("Output folder" if len(panel.sources) > 1 else "Output file")
+                if automatic:
+                    panel.output_edit.setText(panel._default_output())
+            if not automatic and previous_count == 1 and len(panel.sources) > 1:
+                panel.output_edit.setText(str(Path(destination).parent))
+            try:
+                folder = Path(self.quick_folder).expanduser() if self.quick_folder else None
+                if media == "image":
+                    if not self.magick:
+                        raise ValueError(missing_magick_message())
+                    settings = self._current_preset()
+                    extensions = [self._selected_extension(source) for source in sources]
+                    if settings.target_kib and any(extension not in TARGET_FORMATS for extension in extensions):
+                        raise ValueError("File-size limits support JPG, WEBP and AVIF. Choose one of these output formats.")
+                    outputs = unique_outputs(list(zip(sources, extensions)), folder, protected)
+                    commands = tuple(tuple(self._build_command(source, output)) for source, output in zip(sources, outputs))
+                else:
+                    if not panel.available:
+                        raise ValueError("Video processing is unavailable. Install FFmpeg and FFprobe, then restart PixelKit.")
+                    settings = panel._current_settings()
+                    outputs = unique_outputs([(source, "mp4") for source in sources], folder, protected)
+                    commands = ()
+                self._quick_pending.append(QuickBatch(media, tuple(sources), outputs, settings, commands))
+                protected.extend(outputs)
+            except (OSError, ValueError, RuntimeError) as exc:
+                # Keep validation failures available in the same report/log UI
+                # as runtime failures, without opening a blocking dialog.
+                failed = tuple(FileResult(source, source.with_name(f"{source.stem}_optimized.{'mp4' if media == 'video' else source.suffix.lstrip('.')}"), None, None,
+                                          f"Could not start quick processing: {exc}", media_type=media) for source in sources)
+                self._record_quick_report(media, BatchReport(failed, sources[0].parent))
+        self._update_quick_ui()
+        self._quick_timer.start(0)
+
+    def _start_next_quick_batch(self) -> None:
+        if self._closing or self._quick_active or not self._quick_pending:
+            return
+        if self.processing or self.video_panel.processing or (self.worker and self.worker.isRunning()) or (self.video_panel.worker and self.video_panel.worker.isRunning()):
+            return  # Completion handlers wake the queue after joining workers.
+        if self._onboarding_page is not None or QApplication.activeModalWidget() or QApplication.activePopupWidget():
+            self._quick_timer.start(150)
+            return
+        batch = self._quick_pending.popleft()
+        self._quick_active = batch
+        self.media_stack.setCurrentIndex(1 if batch.media == "video" else 0)
+        try:
+            for output in batch.outputs:
+                output.parent.mkdir(parents=True, exist_ok=True)
+            if batch.media == "image":
+                limit = batch.settings.target_kib * 1024 if batch.settings.target_kib else None
+                self.worker = BatchWorker([(list(command), output) for command, output in zip(batch.commands, batch.outputs)], batch.outputs[0].parent,
+                                          limit, retry_settings=batch.settings, overwrite=False)
+                self.worker.progress.connect(self._set_progress)
+                self.worker.finished.connect(self._processing_finished)
+                self._set_processing_state(True)
+                self.progress.setRange(0, len(batch.sources))
+                self.progress.setValue(0)
+                self.progress.show()
+                self._set_status(f"Processing 0 / {len(batch.sources)}…")
+                self.worker.start()
+            else:
+                panel = self.video_panel
+                panel.worker = VideoWorker(list(zip(batch.sources, batch.outputs)), batch.outputs[0].parent, batch.settings, overwrite=False)
+                panel.worker.encoding_progress.connect(panel._encoding_progress)
+                panel.worker.progress.connect(panel._file_progress)
+                panel.worker.finished.connect(panel._finished)
+                panel.quick_processing = True
+                panel.completed_files = 0
+                panel.batch_size = len(batch.sources)
+                panel._set_busy(True)
+                panel.progress.setValue(0)
+                panel.status.setText(f"File 1 of {panel.batch_size} · Preparing…")
+                panel.worker.start()
+            self._update_quick_ui()
+        except (OSError, ValueError, RuntimeError) as exc:
+            if batch.media == "image":
+                self._set_processing_state(False)
+                self.progress.hide()
+            else:
+                self.video_panel.quick_processing = False
+                self.video_panel._set_busy(False)
+            failed = tuple(FileResult(source, output, None, None, f"Could not start quick processing: {exc}", media_type=batch.media) for source, output in zip(batch.sources, batch.outputs))
+            self._complete_quick_batch(BatchReport(failed, batch.outputs[0].parent, retry_settings=batch.settings))
+
+    def _record_quick_report(self, media: str, report: BatchReport) -> None:
+        previous = self._quick_reports.get(media)
+        if previous:
+            report = replace(report, files=previous.files + report.files, cancelled=previous.cancelled or report.cancelled,
+                             retry_settings=report.retry_settings if previous.retry_settings == report.retry_settings else None)
+        self._quick_reports[media] = report
+        panel = self.video_panel if media == "video" else self
+        panel.last_report = report
+        panel.report_button.show()
+        panel.report_button.setEnabled(True)
+        summary = report.completion_status("videos" if media == "video" else "images")
+        if report.before > report.after:
+            summary += f" · Saved {human_size(report.before - report.after)}"
+        if report.failed:
+            summary += " · View last report for error details"
+        if media == "video":
+            panel.status.setText(summary)
+        else:
+            self._set_status(summary)
+
+    def _complete_quick_batch(self, report: BatchReport) -> None:
+        batch = self._quick_active
+        if batch is None:
+            return
+        self._quick_active = None
+        self._record_quick_report(batch.media, report)
+        self._update_quick_ui()
+        self._quick_timer.start(0)
+
+    def _video_batch_finished(self, report: BatchReport) -> None:
+        if self._quick_active and self._quick_active.media == "video":
+            self._complete_quick_batch(report)
+        elif self._quick_cancelled_manual == "video":
+            self._quick_cancelled_manual = None
+            self._record_quick_report("video", report)
+            self._update_quick_ui()
+        else:
+            self._quick_timer.start(0)
+
+    def _cancel_quick_pending(self) -> None:
+        if self._quick_active is None and not self._quick_pending:
+            return
+        if self._quick_active is None:
+            self._quick_cancelled_manual = "image" if self.processing else "video"
+            if self._quick_cancelled_manual == "video":
+                self.video_panel.quick_processing = True
+        while self._quick_pending:
+            batch = self._quick_pending.popleft()
+            skipped = tuple(FileResult(source, output, None, None, "Not processed because the quick processing queue was cancelled.", "Skipped", media_type=batch.media) for source, output in zip(batch.sources, batch.outputs))
+            self._record_quick_report(batch.media, BatchReport(skipped, batch.outputs[0].parent, True, batch.settings))
+        self._update_quick_ui()
 
     def _open_current_mode(self) -> None:
         if self._onboarding_page is not None:
@@ -1127,11 +1401,17 @@ class ImageMagickStudio(QMainWindow):
         self.output_edit.setAccessibleName("Output file or folder")
         self.output_button = QPushButton("Choose…")
         self.output_button.clicked.connect(self._choose_output)
-        output_row = QHBoxLayout()
+        self.manual_output_row = QWidget()
+        output_row = QHBoxLayout(self.manual_output_row)
+        output_row.setContentsMargins(0, 0, 0, 0)
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_button)
-        layout.addLayout(output_row)
+        layout.addWidget(self.manual_output_row)
+        self.quick_destination = QuickDestination(self.colors)
+        self.quick_destination.hide()
+        layout.addWidget(self.quick_destination)
         note = QLabel("The file extension follows the selected format.")
+        self.output_note = note
         note.setObjectName("infoLabel")
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -1218,11 +1498,13 @@ class ImageMagickStudio(QMainWindow):
             QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 16px; }}
             QLabel#appTitle {{ color: {c['text']}; font-size: 25px; font-weight: 700; }}
             QLabel#appVersion {{ color: {c['muted']}; font-size: 12px; font-weight: 400; }}
+            QLabel#quickHint {{ color: {c['muted']}; font-size: 11px; }}
             QLabel#appSubtitle {{ color: {c['muted']}; font-size: 13px; }}
             QLabel#badge {{ background: #172d2d; color: {c['teal']}; border-radius: 12px; padding: 8px 12px; font-size: 12px; font-weight: 600; }}
             QLabel#sectionTitle {{ color: {c['text']}; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }}
             QLabel#sectionSubtitle, QLabel#infoLabel, QLabel#statusLabel {{ color: {c['muted']}; font-size: 12px; }}
             QLabel#dropHint {{ color: {c['muted']}; background: transparent; border: none; font-size: 13px; }}
+            QListWidget[quickProcessing="true"] {{ border-color: {c['teal']}; }}
             QLabel:disabled {{ color: {c['muted']}; }}
             QLabel#valueBadge {{ background: #282241; color: #bdb0ff; border-radius: 8px; padding: 5px 8px; font-weight: 700; }}
             QLineEdit, QComboBox {{ background: {c['input']}; color: {c['text']}; border: 1px solid {c['control_border']}; border-radius: 9px; padding: 8px 10px; selection-background-color: {c['accent']}; selection-color: white; }}
@@ -1298,13 +1580,18 @@ class ImageMagickStudio(QMainWindow):
         self._update_action_state()
 
     def _update_action_state(self) -> None:
-        ready = bool(self.magick and self.sources and self.output_edit.text().strip() and not self.processing)
+        video_panel = getattr(self, "video_panel", None)
+        busy = bool(self.processing or (self.worker and self.worker.isRunning()) or self._quick_pending or
+                    (video_panel is not None and (video_panel.processing or (video_panel.worker and video_panel.worker.isRunning()))))
+        ready = bool(self.magick and self.sources and (self.quick_enabled or self.output_edit.text().strip()) and not busy)
         self.process_button.setEnabled(ready)
         self.report_button.setEnabled(self.last_report is not None and not self.processing)
-        self.clear_button.setEnabled(bool(self.sources) and not self.processing)
+        self.clear_button.setEnabled(bool(self.sources) and not busy)
         self._update_source_removal_state()
-        video_panel = getattr(self, "video_panel", None)
-        busy = self.processing or (video_panel is not None and video_panel.processing)
+        if video_panel is not None:
+            video_panel.process_button.setEnabled(bool(video_panel.available and video_panel.sources and (self.quick_enabled or video_panel.output_edit.text().strip()) and not busy))
+            video_panel.clear_button.setEnabled(bool(video_panel.sources) and not busy)
+            video_panel._update_source_removal_state()
         onboarding_active = self._onboarding_page is not None
         for button in getattr(self, "mode_buttons", ()):
             button.setEnabled(not busy)
@@ -1344,6 +1631,7 @@ class ImageMagickStudio(QMainWindow):
 
     def _cancel_processing(self) -> None:
         if self.worker and self.processing:
+            self._cancel_quick_pending()
             self.worker.cancel()
             self.cancel_button.setEnabled(False)
             self.cancel_button.setText("Cancelling…")
@@ -1569,6 +1857,8 @@ class ImageMagickStudio(QMainWindow):
             event.ignore()
             return
         self._closing = True
+        self._quick_timer.stop()
+        self._quick_pending.clear()
         self._onboarding_timer.stop()
         if self._update_dialog is not None:
             self._update_dialog.cancel_check()
@@ -1663,7 +1953,10 @@ class ImageMagickStudio(QMainWindow):
 
     def _start_processing(self) -> None:
         # Menu shortcuts remain available while the process button is disabled.
-        if self.worker and self.worker.isRunning():
+        if self._retry_busy():
+            return
+        if self.quick_enabled:
+            self._queue_quick_drop(list(self.sources))
             return
         if not self.magick:
             self._show_message(QMessageBox.Icon.Critical, "ImageMagick not found", missing_magick_message())
@@ -1747,7 +2040,16 @@ class ImageMagickStudio(QMainWindow):
         self._set_processing_state(False)
         self.progress.hide()
         self._set_status(report.completion_status())
-        self._show_last_report()
+        if self._quick_active and self._quick_active.media == "image":
+            self._complete_quick_batch(report)
+        elif self._quick_cancelled_manual == "image":
+            self._quick_cancelled_manual = None
+            self._record_quick_report("image", report)
+            self._update_quick_ui()
+        else:
+            if not self._quick_pending:
+                self._show_last_report()
+            self._quick_timer.start(0)
 
     def _show_last_report(self) -> None:
         if self.last_report is not None and not self.processing:
@@ -1761,7 +2063,7 @@ class ImageMagickStudio(QMainWindow):
 
     def _retry_busy(self) -> bool:
         video = self.video_panel
-        return bool(self.processing or (self.worker and self.worker.isRunning()) or video.processing or (video.worker and video.worker.isRunning()))
+        return bool(self._quick_pending or self.processing or (self.worker and self.worker.isRunning()) or video.processing or (video.worker and video.worker.isRunning()))
 
     def _retry_failed(self, report: BatchReport, dialog: ReportDialog | None = None) -> bool:
         if self._retry_busy():

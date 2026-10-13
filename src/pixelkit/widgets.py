@@ -1,11 +1,79 @@
 """Shared dark dropdowns for PixelKit's processing controls."""
 from __future__ import annotations
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, QSize, Qt
+from PyQt6.QtCore import QEvent, QPoint, QRect, QRectF, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
-from PyQt6.QtWidgets import QAbstractItemView, QComboBox, QFrame, QListView, QProxyStyle, QStyle, QStyledItemDelegate
+from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QHBoxLayout, QListView, QPushButton, QProxyStyle, QStyle, QStyledItemDelegate, QWidget
+from pathlib import Path
 
 DETAIL_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+class ToggleSwitch(QCheckBox):
+    """Native checkbox semantics with a compact, keyboard accessible switch."""
+    def __init__(self, colors, parent=None):
+        super().__init__(parent)
+        self.colors = colors
+        self.setAccessibleName("Quick processing")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(44, 26)
+
+    def hitButton(self, pos):
+        return self.rect().contains(pos)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self.colors["accent"] if self.isChecked() else self.colors["control_border"]))
+        painter.drawRoundedRect(QRectF(2, 3, 40, 20), 10, 10)
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(QRectF(24 if self.isChecked() else 5, 6, 14, 14))
+        if self.hasFocus():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(QColor(self.colors["teal"]), 1.5))
+            painter.drawRoundedRect(QRectF(0.75, 0.75, 42.5, 24.5), 12, 12)
+
+
+class QuickDestination(QWidget):
+    changed = pyqtSignal(str)
+
+    def __init__(self, colors, parent=None):
+        super().__init__(parent)
+        self.folder = ""
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.combo = DropdownComboBox(colors)
+        self.combo.setAccessibleName("Quick processing destination")
+        self.combo.addItems(["Beside original files", "Selected output folder"])
+        self.combo.currentIndexChanged.connect(self._selected)
+        row.addWidget(self.combo, 1)
+        self.choose_button = QPushButton("Choose…")
+        self.choose_button.clicked.connect(self.choose_folder)
+        row.addWidget(self.choose_button)
+
+    def set_folder(self, folder: str):
+        self.folder = folder
+        self.combo.blockSignals(True)
+        self.combo.setItemText(1, f"Folder: {Path(folder).name}" if folder else "Selected output folder")
+        self.combo.setCurrentIndex(1 if folder else 0)
+        self.combo.setToolTip(folder or "Each result is saved beside its original, with a new filename.")
+        self.combo.blockSignals(False)
+
+    def _selected(self, index):
+        if index == 0:
+            self.changed.emit("")
+        elif self.folder:
+            self.changed.emit(self.folder)
+        else:
+            self.choose_folder()
+
+    def choose_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Choose a quick processing output folder", self.folder)
+        if folder:
+            self.changed.emit(folder)
+        else:
+            self.set_folder(self.folder)
 
 
 class DropdownStyle(QProxyStyle):

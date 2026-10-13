@@ -12,12 +12,14 @@ from pixelkit.report import BatchReport, ReportDialog, human_size
 from pixelkit.retry import validate_retry_output
 from pixelkit.video import VIDEO_SUFFIXES, VideoSettings, VideoWorker, find_ffmpeg, find_ffprobe
 from pixelkit.video_presets import VideoPresetStore, video_preset_description, video_preset_name
-from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox
+from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox, QuickDestination
 
 
 class VideoPanel(QWidget):
     busy_changed = pyqtSignal(bool)
     state_changed = pyqtSignal()
+    batch_finished = pyqtSignal(object)
+    cancel_requested = pyqtSignal()
 
     def __init__(self, colors, drop_list, show_message, parent=None, preset_store: VideoPresetStore | None = None) -> None:
         super().__init__(parent)
@@ -26,6 +28,10 @@ class VideoPanel(QWidget):
         self.sources = []
         self.worker = None
         self.processing = False
+        self.quick_processing = False
+        self.quick_mode = False
+        self.quick_jobs_waiting = False
+        self.quick_start = None
         self.completed_files = 0
         self.batch_size = 0
         self.last_report = None
@@ -174,10 +180,15 @@ class VideoPanel(QWidget):
         self.output_edit.textChanged.connect(self._update_state)
         self.output_button = QPushButton('Choose…')
         self.output_button.clicked.connect(self.choose_output)
-        output_row = QHBoxLayout()
+        self.manual_output_row = QWidget()
+        output_row = QHBoxLayout(self.manual_output_row)
+        output_row.setContentsMargins(0, 0, 0, 0)
         output_row.addWidget(self.output_edit, 1)
         output_row.addWidget(self.output_button)
-        output_layout.addLayout(output_row)
+        output_layout.addWidget(self.manual_output_row)
+        self.quick_destination = QuickDestination(colors)
+        self.quick_destination.hide()
+        output_layout.addWidget(self.quick_destination)
         output_note = QLabel('Subtitles, chapters and metadata are not included.')
         output_note.setObjectName('infoLabel')
         output_note.setWordWrap(True)
@@ -191,6 +202,9 @@ class VideoPanel(QWidget):
         self.report_button.clicked.connect(self.show_report)
         self.report_button.hide()
         output_layout.addWidget(self.report_button)
+        self.open_output_button = QPushButton('Open output folder')
+        self.open_output_button.hide()
+        output_layout.addWidget(self.open_output_button)
         grid.addWidget(output, 1, 0, alignment=Qt.AlignmentFlag.AlignTop)
         grid.setRowStretch(2, 1)
         self.locked_widgets = (inputs, settings, self.output_edit, self.output_button)
@@ -571,7 +585,10 @@ class VideoPanel(QWidget):
             self.output_edit.setText(path)
 
     def start_processing(self) -> None:
-        if self.processing or not self.sources or not self.available:
+        if self._retry_busy() or not self.sources or not self.available:
+            return
+        if self.quick_mode and self.quick_start is not None:
+            self.quick_start()
             return
         text = self.output_edit.text().strip()
         if not text:
@@ -652,6 +669,7 @@ class VideoPanel(QWidget):
 
     def cancel_processing(self) -> None:
         if self.worker and self.processing:
+            self.cancel_requested.emit()
             self.worker.cancel()
             self.cancel_button.setEnabled(False)
             self.cancel_button.setText('Cancelling…')
@@ -666,7 +684,11 @@ class VideoPanel(QWidget):
         self._set_busy(False)
         self.report_button.show()
         self.status.setText(report.completion_status("videos"))
-        self.show_report()
+        quick = self.quick_processing
+        self.quick_processing = False
+        if not quick and not self.quick_jobs_waiting:
+            self.show_report()
+        self.batch_finished.emit(report)
 
     def show_report(self) -> None:
         if self.last_report is not None and not self.processing:
@@ -687,7 +709,7 @@ class VideoPanel(QWidget):
         parent = self.parentWidget()
         while parent is not None:
             worker = getattr(parent, 'worker', None)
-            if getattr(parent, 'processing', False) or (worker is not None and worker.isRunning()):
+            if getattr(parent, '_quick_pending', ()) or getattr(parent, 'processing', False) or (worker is not None and worker.isRunning()):
                 return True
             parent = parent.parentWidget()
         return False

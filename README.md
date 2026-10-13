@@ -19,7 +19,8 @@ The packaged macOS app includes Python, Qt, ImageMagick, FFmpeg/FFprobe, and the
 - Image compression with adjustable quality.
 - Convert between JPG, PNG, WEBP, AVIF, GIF, BMP, TIFF, and other formats supported by ImageMagick.
 - Remove EXIF and other image metadata.
-- Drop images, videos or folders anywhere in the workspace. PixelKit switches to **Images** or **Video** for a single media type, appends files without clearing either queue, and ignores duplicates. A mixed image/video drop adds each type to its own queue and keeps the current tab. Folders contribute their immediate files; nested folders are skipped. Drops are disabled while processing.
+- Drop images, videos or folders anywhere in the workspace. PixelKit switches to **Images** or **Video** for a single media type, appends files without clearing either queue, and ignores duplicates. A mixed image/video drop adds each type to its own queue and keeps the current tab in manual mode. Folders contribute their immediate files; nested folders are skipped. Manual-mode drops are disabled while processing.
+- Enable **Quick processing** to start dropped files automatically with each media type's current settings. The switch defaults off and remembers its state. Settings are captured when files are dropped; additional drops wait in a sequential queue, including mixed image/video batches. **Save to** offers **Beside original files** or a shared, remembered output folder. Results use `_optimized` and numbered suffixes; existing files are never overwritten. Turning the switch off keeps accepted jobs and makes subsequent drops manual. **Cancel processing** stops the active conversion and skips waiting jobs while keeping completed results. Completion stays in the main window; **View last report** retains errors and results from the queue, and **Open output folder** opens the first successful result's folder. File pickers and Finder Open With do not auto-start processing.
 - Select an input image and use **Remove** (or **Delete / Backspace** while the list has focus) to remove only that image from the queue. **Clear all** empties the queue; original files stay on disk.
 - Modern dark interface with HiDPI / Retina support.
 - **Help → Check for updates…** checks the latest published stable GitHub release when you ask. It shows the installed and available versions and offers the matching macOS installer, or the release page when an installer for your system is unavailable. Downloads open in your browser; installation stays manual. There are no automatic startup checks. Offline, timeout and GitHub rate-limit errors can be retried without changing your files or settings.
@@ -101,8 +102,9 @@ src/pixelkit/       Application package and bundled icons
   updates.py       Stable release versions and matching installers
   update_dialog.py Manual update checks and download links
   presets.py       Built-in presets and saved preferences
+  quick_processing.py Drop batches, unique output names and safe publication
   runtime.py       Platform resources and ImageMagick discovery
-  widgets.py       Shared dropdown widgets
+  widgets.py       Shared dropdowns, switches and destination controls
   report.py        Per-file results and compression report
   bug_report.py    Sanitized bug diagnostics, GitHub links and safe report export
   bug_report_dialog.py Editable bug-report drafts and preview
