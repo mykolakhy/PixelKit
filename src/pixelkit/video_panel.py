@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QLocale, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QDoubleValidator, QKeySequence
-from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QMessageBox, QPushButton, QProgressBar, QScrollArea, QSizePolicy, QVBoxLayout, QWidget
 
 from pixelkit.report import BatchReport, ReportDialog, human_size
 from pixelkit.retry import validate_retry_output
@@ -59,7 +59,9 @@ class VideoPanel(QWidget):
         layout.addWidget(scroll, 1)
 
         inputs, inputs_layout = self._card('Input videos', 'MP4, MOV and M4V · process a file or a batch')
-        self.source_list.setFixedHeight(160)
+        self.source_list.setMinimumHeight(110)
+        self.source_list.setMaximumHeight(320)
+        self.source_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
         self.source_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.source_list.files_dropped.connect(self.add_sources)
         input_actions = QHBoxLayout()
@@ -85,12 +87,13 @@ class VideoPanel(QWidget):
         for button in (self.add_button, self.folder_button, self.remove_button, self.clear_button):
             input_actions.addWidget(button)
         inputs_layout.addLayout(input_actions)
-        inputs_layout.addWidget(self.source_list)
+        inputs_layout.addWidget(self.source_list, 1)
         self.source_info = QLabel('Drop videos here to get started')
         self.source_info.setObjectName('infoLabel')
         self.source_info.setWordWrap(True)
         inputs_layout.addWidget(self.source_info)
-        grid.addWidget(inputs, 0, 0, alignment=Qt.AlignmentFlag.AlignTop)
+        grid.addWidget(inputs, 0, 0)
+        grid.setRowStretch(0, 1)
 
         settings, settings_layout = self._card('Compression', 'Choose a balance between quality and file size')
         self.saved_preset_combo = DropdownComboBox(colors)
@@ -201,12 +204,14 @@ class VideoPanel(QWidget):
         self.report_button = QPushButton('View last report')
         self.report_button.clicked.connect(self.show_report)
         self.report_button.hide()
-        output_layout.addWidget(self.report_button)
         self.open_output_button = QPushButton('Open output folder')
         self.open_output_button.hide()
-        output_layout.addWidget(self.open_output_button)
+        result_actions = QHBoxLayout()
+        result_actions.setSpacing(8)
+        result_actions.addWidget(self.report_button)
+        result_actions.addWidget(self.open_output_button)
+        output_layout.addLayout(result_actions)
         grid.addWidget(output, 1, 0, alignment=Qt.AlignmentFlag.AlignTop)
-        grid.setRowStretch(2, 1)
         self.locked_widgets = (inputs, settings, self.output_edit, self.output_button)
 
         footer = QHBoxLayout()

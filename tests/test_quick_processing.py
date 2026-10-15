@@ -191,6 +191,29 @@ class QuickProcessingTests(unittest.TestCase):
                 self.assertEqual(self.window.quick_switch.visibleRegion().boundingRect(), self.window.quick_switch.rect())
                 self.assertEqual(self.window.findChild(QScrollArea, "imageScroll").verticalScrollBar().maximum(), 0)
 
+    def test_completed_video_controls_fit_default_and_large_windows(self):
+        from PyQt6.QtWidgets import QScrollArea
+        self.enable()
+        self.drop([self.file("recording.mov")])
+        self.pump()
+        self.complete("video")
+        panel = self.window.video_panel
+        scroll = panel.findChild(QScrollArea)
+        for enabled in (True, False):
+            self.window.quick_switch.setChecked(enabled)
+            for limited in (False, True):
+                panel.target_size_check.setChecked(limited)
+                for size in ((1100, 780), (1440, 900)):
+                    with self.subTest(quick=enabled, limited=limited, size=size):
+                        self.window.resize(*size)
+                        self.pump()
+                        self.assertEqual(scroll.verticalScrollBar().maximum(), 0)
+                        destination = panel.quick_destination if enabled else panel.manual_output_row
+                        for control in (panel.source_list, panel.report_button, panel.open_output_button,
+                                        panel.process_button, destination):
+                            self.assertTrue(control.isVisible())
+                            self.assertEqual(control.visibleRegion().boundingRect(), control.rect())
+
     def test_mixed_drop_is_sequential_and_uses_each_media_settings(self):
         image, video = self.file("image.png"), self.file("video.mov")
         self.window.quality_slider.setValue(65)
