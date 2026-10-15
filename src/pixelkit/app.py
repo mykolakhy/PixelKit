@@ -34,8 +34,6 @@ from PyQt6.QtWidgets import (
     QProgressBar,
     QScrollArea,
     QStackedWidget,
-    QToolButton,
-    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -599,7 +597,7 @@ class ImageMagickStudio(QMainWindow):
         self.content_stack.addWidget(page)
         outer = QVBoxLayout(page)
         outer.setContentsMargins(30, 26, 30, 20)
-        outer.setSpacing(14)
+        outer.setSpacing(10)
 
         header = QHBoxLayout()
         header.setSpacing(14)
@@ -652,27 +650,24 @@ class ImageMagickStudio(QMainWindow):
         self.mode_buttons[0].setChecked(True)
         mode_row.addStretch()
         quick_controls_widget = QWidget()
+        quick_controls_widget.setObjectName("quickControls")
         quick_controls_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        quick_controls = QHBoxLayout(quick_controls_widget)
+        quick_controls = QVBoxLayout(quick_controls_widget)
         quick_controls.setContentsMargins(0, 0, 0, 0)
-        quick_controls.setSpacing(8)
+        quick_controls.setSpacing(2)
+        quick_header = QHBoxLayout()
+        quick_header.setSpacing(8)
         quick_label = QLabel("Quick processing")
         self.quick_switch = ToggleSwitch(self.colors)
         self.quick_switch.setChecked(self.quick_enabled)
         quick_label.setBuddy(self.quick_switch)
-        quick_controls.addWidget(quick_label)
-        self.quick_info = QToolButton()
-        self.quick_info.setObjectName("quickInfo")
-        self.quick_info.setIcon(QIcon(str(resource_path("info.svg"))))
-        self.quick_info.setIconSize(QSize(18, 18))
-        self.quick_info.setFixedSize(26, 26)
-        self.quick_info.setAccessibleName("About quick processing")
-        self.quick_info.setAccessibleDescription(QUICK_PROCESSING_HELP)
-        self.quick_info.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.quick_info.clicked.connect(lambda: QToolTip.showText(
-            self.quick_info.mapToGlobal(self.quick_info.rect().bottomLeft()), self.quick_info.toolTip(), self.quick_info))
-        quick_controls.addWidget(self.quick_info)
-        quick_controls.addWidget(self.quick_switch)
+        quick_header.addWidget(quick_label)
+        quick_header.addStretch(1)
+        quick_header.addWidget(self.quick_switch)
+        quick_controls.addLayout(quick_header)
+        quick_description = QLabel("Process dropped files automatically.\nOriginals stay untouched.")
+        quick_description.setObjectName("quickDescription")
+        quick_controls.addWidget(quick_description)
         mode_row.addWidget(quick_controls_widget)
         outer.addLayout(mode_row)
         self.media_stack = QStackedWidget()
@@ -681,7 +676,7 @@ class ImageMagickStudio(QMainWindow):
         self.media_stack.addWidget(image_page)
         outer = QVBoxLayout(image_page)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(12)
+        outer.setSpacing(8)
 
         preset_row = QHBoxLayout()
         preset_row.setSpacing(10)
@@ -809,12 +804,12 @@ class ImageMagickStudio(QMainWindow):
             self._set_status("Quick processing is on · Drop files to start" if self.quick_enabled else "Add images to get started")
         if not self.video_panel.sources and not self.video_panel.processing and self.video_panel.last_report is None and self.video_panel.available:
             self.video_panel.status.setText("Quick processing is on · Drop files to start" if self.quick_enabled else "Add videos to get started")
-        waiting = sum(len(batch.sources) for batch in self._quick_pending)
         self.video_panel.quick_jobs_waiting = bool(self._quick_pending)
-        help_text = QUICK_PROCESSING_HELP.replace("\n\n", "</p><p>")
+        help_text = QUICK_PROCESSING_HELP
         if self._quick_active:
-            help_text += f"</p><p><b>Currently processing</b> · {waiting} file(s) waiting."
-        self.quick_info.setToolTip(f"<qt><table width='320'><tr><td><b>Quick processing</b><p>{help_text}</p></td></tr></table></qt>")
+            waiting = sum(len(batch.sources) for batch in self._quick_pending)
+            help_text += f"\n\nCurrently processing · {waiting} file(s) waiting."
+        self.quick_switch.setAccessibleDescription(help_text)
         self.quick_switch.setToolTip("Only dropped files start automatically. Turning this off keeps already queued jobs. Use Cancel processing to stop the queue.")
         self._update_action_state()
 
@@ -1506,9 +1501,7 @@ class ImageMagickStudio(QMainWindow):
             QFrame#card {{ background: {c['card']}; border: 1px solid {c['border']}; border-radius: 16px; }}
             QLabel#appTitle {{ color: {c['text']}; font-size: 25px; font-weight: 700; }}
             QLabel#appVersion {{ color: {c['muted']}; font-size: 12px; font-weight: 400; }}
-            QToolButton#quickInfo {{ background: transparent; border: 1px solid transparent; border-radius: 7px; padding: 0; }}
-            QToolButton#quickInfo:hover {{ background: {c['input']}; }}
-            QToolButton#quickInfo:focus {{ border-color: {c['teal']}; }}
+            QLabel#quickDescription {{ color: {c['muted']}; font-size: 12px; }}
             QLabel#appSubtitle {{ color: {c['muted']}; font-size: 13px; }}
             QLabel#badge {{ background: #172d2d; color: {c['teal']}; border-radius: 12px; padding: 8px 12px; font-size: 12px; font-weight: 600; }}
             QLabel#sectionTitle {{ color: {c['text']}; font-size: 14px; font-weight: 700; letter-spacing: 0.5px; }}

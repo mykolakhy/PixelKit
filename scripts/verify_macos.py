@@ -24,7 +24,7 @@ def verify(app: Path) -> None:
         metadata = plistlib.load(source)
     extensions = {extension for document in metadata.get("CFBundleDocumentTypes", []) for extension in document.get("CFBundleTypeExtensions", [])}
     assert {"mp4", "mov", "m4v"}.issubset(extensions), "Video document registration is incomplete"
-    for name in ("PixelKit.png", "PixelKit.ico", "check.svg", "chevron-down.svg", "chevron-up.svg", "info.svg"):
+    for name in ("PixelKit.png", "PixelKit.ico", "check.svg", "chevron-down.svg", "chevron-up.svg"):
         assert (resources / "pixelkit" / "assets" / name).is_file(), f"Application resource is missing: {name}"
     # Check every bundled Mach-O dependency. Absolute Homebrew paths would make
     # a build appear functional locally but break on another person's Mac.
