@@ -699,7 +699,7 @@ class ImageMagickStudio(QMainWindow):
         image_content = QWidget()
         image_content.setObjectName("imageContent")
         cards = QGridLayout(image_content)
-        cards.setContentsMargins(0, 0, 8, 0)
+        cards.setContentsMargins(0, 0, 0, 0)
         cards.setSpacing(10)
         cards.setColumnStretch(0, 5)
         cards.setColumnStretch(1, 4)

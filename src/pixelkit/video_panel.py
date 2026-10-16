@@ -51,7 +51,7 @@ class VideoPanel(QWidget):
         content = QWidget()
         content.setObjectName('leftContent')
         grid = QGridLayout(content)
-        grid.setContentsMargins(0, 0, 8, 0)
+        grid.setContentsMargins(0, 0, 0, 0)
         grid.setSpacing(18)
         grid.setColumnStretch(0, 5)
         grid.setColumnStretch(1, 4)
