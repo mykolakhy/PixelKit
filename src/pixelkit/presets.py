@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from PyQt6.QtCore import QSettings
 
 OUTPUT_FORMATS = ["Automatic", "JPG", "PNG", "WEBP", "AVIF", "GIF", "BMP", "TIFF"]
+MAX_SCALE_PERCENT = 1000
 
 
 def preset_name(value: str) -> str:
@@ -30,13 +31,16 @@ class Preset:
     background: str = "#ffffff"
     output_format: str = "Automatic"
     target_kib: int | None = None
+    scale_percent: int = 100
 
     def __post_init__(self) -> None:
-        if self.resize_mode not in ("dimensions", "longest_side"):
+        if self.resize_mode not in ("dimensions", "longest_side", "percentage"):
             raise ValueError("Choose a supported resize mode.")
         for value in (self.width, self.height, self.longest_side):
             if value is not None and (type(value) is not int or not 1 <= value <= 100000):
                 raise ValueError("Image dimensions must be between 1 and 100000 pixels, or empty.")
+        if type(self.scale_percent) is not int or not 1 <= self.scale_percent <= MAX_SCALE_PERCENT:
+            raise ValueError(f"Scale must be between 1 and {MAX_SCALE_PERCENT}%.")
         if type(self.quality) is not int or not 10 <= self.quality <= 100:
             raise ValueError("Quality must be between 10 and 100.")
         if type(self.keep_ratio) is not bool or type(self.strip_metadata) is not bool:
@@ -49,7 +53,9 @@ class Preset:
             raise ValueError("File-size limit must be between 1 and 1000000 KiB.")
 
     def description(self) -> str:
-        if self.resize_mode == "longest_side" and self.longest_side:
+        if self.resize_mode == "percentage":
+            size = f"Scale {self.scale_percent}%"
+        elif self.resize_mode == "longest_side" and self.longest_side:
             size = f"Longest side {self.longest_side} px"
         elif self.resize_mode == "dimensions" and (self.width or self.height):
             size = f"{self.width or 'Original'} × {self.height or 'Original'} px"

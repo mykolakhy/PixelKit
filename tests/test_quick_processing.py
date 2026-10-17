@@ -156,6 +156,22 @@ class QuickProcessingTests(unittest.TestCase):
         self.assertFalse(self.images)
         self.assertEqual(len(self.window.sources), 1)
 
+    def test_percentage_is_captured_for_each_quick_drop(self):
+        self.window.resize_mode.setCurrentIndex(self.window.resize_mode.findData("percentage"))
+        self.window.scale_edit.setText("50")
+        self.enable()
+        self.drop([self.file("first.png")])
+        self.pump()
+        self.window.scale_edit.setText("25")
+        self.drop([self.file("second.png")])
+        self.window.scale_edit.setText("10")
+        self.assertEqual(self.images[0].settings.scale_percent, 50)
+        self.complete()
+        self.assertEqual(self.images[1].settings.scale_percent, 25)
+        command = self.images[1].jobs[0][0]
+        self.assertEqual(command[command.index("-resize") + 1], "25%")
+        self.complete()
+
     def test_setting_and_shared_destination_survive_restart(self):
         folder = self.root / "results"
         self.enable()

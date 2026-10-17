@@ -97,6 +97,50 @@ class ApplicationTests(unittest.TestCase):
             self.assertEqual(message.call_args.args[1], "Unsafe overwrite")
         self.assertIsNone(self.window.worker)
 
+    def test_percentage_batch_resizes_each_original_proportionally(self):
+        magick = find_magick()
+        if not magick:
+            self.skipTest("ImageMagick 7 is needed for the integration check")
+        self.window.magick = magick
+        self.window.resize_mode.setCurrentIndex(self.window.resize_mode.findData("percentage"))
+        self.window.keep_ratio.setChecked(False)
+        sources = []
+        for name, dimensions in (("landscape", "120x80"), ("portrait", "80x120")):
+            source = self.root / f"{name} original.png"
+            run_magick([magick, "-size", dimensions, "xc:#7452eb", str(source)], check=True)
+            sources.append(source)
+        originals = [source.read_bytes() for source in sources]
+        for percentage, dimensions in ((25, ("30x20", "20x30")), (50, ("60x40", "40x60")), (100, ("120x80", "80x120")), (200, ("240x160", "160x240"))):
+            with self.subTest(percentage=percentage):
+                self.window.scale_edit.setText(str(percentage))
+                settings = self.window._current_preset()
+                jobs = []
+                for source in sources:
+                    target = self.root / f"{source.stem}-{percentage}.png"
+                    jobs.append((self.window._build_command(source, target), target))
+                reports = []
+                worker = BatchWorker(jobs, self.root, retry_settings=settings)
+                worker.finished.connect(reports.append)
+                worker.run()
+                self.assertEqual(len(reports[0].successful), len(sources), reports[0])
+                self.assertEqual(reports[0].retry_settings.scale_percent, percentage)
+                for (_, target), expected in zip(jobs, dimensions):
+                    result = run_magick([magick, "identify", "-format", "%wx%h", str(target)], capture_output=True, text=True, check=True)
+                    self.assertEqual(result.stdout, expected)
+        self.assertEqual([source.read_bytes() for source in sources], originals)
+
+    def test_percentage_preset_restores_scale_and_edits_return_to_custom(self):
+        self.window.resize_mode.setCurrentIndex(self.window.resize_mode.findData("percentage"))
+        self.window.scale_edit.setText("25")
+        with patch.object(self.window, "_ask_preset_name", return_value="Quarter size"):
+            self.window._save_preset()
+        self.window.scale_edit.setText("50")
+        self.assertEqual(self.window.preset_combo.currentIndex(), 0)
+        self.window.preset_combo.setCurrentIndex(self.window.preset_combo.findData("saved:Quarter size"))
+        self.assertEqual(self.window.resize_mode.currentData(), "percentage")
+        self.assertEqual(self.window.scale_edit.text(), "25")
+        self.assertEqual(self.window._current_preset(), self.preset_store.load()["Quarter size"])
+
     def test_save_shortcut_cannot_start_a_second_running_batch(self):
         with patch.object(self.window, "worker") as worker, patch.object(self.window, "_show_message") as message:
             worker.isRunning.return_value = True
@@ -281,6 +325,7 @@ class ApplicationTests(unittest.TestCase):
             (0, self.window.width_edit, ("0", "100001", "invalid")),
             (0, self.window.height_edit, ("0", "100001")),
             (1, self.window.long_side_edit, ("0", "100001")),
+            (2, self.window.scale_edit, ("0", "1001", "1.5", "invalid")),
         ):
             self.window.resize_mode.setCurrentIndex(mode)
             for value in values:
@@ -308,6 +353,16 @@ class ApplicationTests(unittest.TestCase):
         self.window.width_edit.clear()
         self.window.height_edit.clear()
         self.window.long_side_edit.setText("0")
+        self.assertTrue(self.window._validate_processing_fields())
+        self.window.resize_mode.setCurrentIndex(2)
+        self.window.scale_edit.clear()
+        self.assertTrue(self.window._validate_processing_fields())
+        self.assertEqual(self.window._current_preset().scale_percent, 100)
+        self.window.scale_edit.setText("50")
+        self.assertTrue(self.window._validate_processing_fields())
+        self.assertIsNone(self.window._current_preset().longest_side)
+        self.window.scale_edit.setText("0")
+        self.window.resize_mode.setCurrentIndex(0)
         self.assertTrue(self.window._validate_processing_fields())
 
     def test_manual_extension_follows_selected_format_and_keeps_name_and_folder(self):
@@ -414,7 +469,7 @@ class ApplicationTests(unittest.TestCase):
             self.window._set_sources(sources)
             for size in ((1040, 620), (1100, 780), (1440, 900), (1440, 1000), (1100, 780)):
                 self.window.resize(*size)
-                for mode in (0, 1):
+                for mode in (0, 1, 2):
                     self.window.resize_mode.setCurrentIndex(mode)
                     self.window.media_stack.setCurrentIndex(1)
                     self.window.media_stack.setCurrentIndex(0)
@@ -440,7 +495,7 @@ class ApplicationTests(unittest.TestCase):
         try:
             for locale_name in ("en_US", "en_PL"):
                 QLocale.setDefault(QLocale(locale_name))
-                for edit, maximum in ((self.window.width_edit, 100000), (self.window.height_edit, 100000), (self.window.long_side_edit, 100000), (self.window.target_size_edit, 1000000)):
+                for edit, maximum in ((self.window.width_edit, 100000), (self.window.height_edit, 100000), (self.window.long_side_edit, 100000), (self.window.scale_edit, 1000), (self.window.target_size_edit, 1000000)):
                     with self.subTest(locale=locale_name, field=edit.accessibleName()):
                         edit.setValidator(self.window._integer_validator(1, maximum))
                         edit.setText(f"1{edit.validator().locale().groupSeparator()}000")
@@ -460,11 +515,11 @@ class ApplicationTests(unittest.TestCase):
             for locale_name in ("ar_EG", "fa_IR", "he_IL", "en_US"):
                 locale = QLocale(locale_name)
                 locale.setNumberOptions(locale.numberOptions() | QLocale.NumberOption.RejectGroupSeparator)
-                for edit, value in ((self.window.width_edit, 123), (self.window.height_edit, 45), (self.window.long_side_edit, 99), (self.window.target_size_edit, 500)):
+                for edit, value in ((self.window.width_edit, 123), (self.window.height_edit, 45), (self.window.long_side_edit, 99), (self.window.scale_edit, 50), (self.window.target_size_edit, 500)):
                     edit.validator().setLocale(locale)
                     edit.setText(locale.positiveSign() + locale.toString(value))
                     self.assertTrue(edit.hasAcceptableInput())
-                for mode, geometry in ((0, "123x45"), (1, "99x99")):
+                for mode, geometry in ((0, "123x45"), (1, "99x99"), (2, "50%")):
                     with self.subTest(locale=locale_name, mode=mode):
                         self.window.resize_mode.setCurrentIndex(mode)
                         self.window.output_edit.setText(str(self.root / f"{locale_name}-{mode}.webp"))

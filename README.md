@@ -53,6 +53,12 @@ Use **Save preset…** in the video Compression card to keep your quality, resol
 
 This version supports SDR videos. HDR, wide-gamut and transparent video sources receive a clear unsupported-video error. Output retains the main video and all selected audio tracks; subtitles, extra video tracks, chapters and metadata are omitted. Video playback/comparison and hardware acceleration are not included yet. All processing remains local.
 
+## Image resizing
+
+Choose **Percentage** in **Resize mode** to scale each image relative to its original dimensions. Enter a whole number from **1 to 1000%**: **50%** halves both width and height, **25%** reduces both to a quarter, and **100%** keeps the original dimensions. Aspect ratio is always preserved in this mode. An empty Scale field also keeps the original size.
+
+Percentage resizing works with single images, batches, saved presets, Quick processing, and retrying failed files. Each image in a batch uses its own original dimensions.
+
 ## Presets
 
 Choose a preset above the image settings to apply it to every input image:

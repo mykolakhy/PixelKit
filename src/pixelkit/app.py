@@ -43,7 +43,7 @@ from pixelkit.bug_report import BugReportContext
 from pixelkit.bug_report_dialog import BugReportDialog
 from pixelkit.onboarding import OnboardingPage
 from pixelkit.runtime import ProcessingCancelled, find_magick, missing_magick_message, resource_path, run_magick
-from pixelkit.presets import BUILTIN_PRESETS, OUTPUT_FORMATS, Preset, PresetStore, preset_name
+from pixelkit.presets import BUILTIN_PRESETS, MAX_SCALE_PERCENT, OUTPUT_FORMATS, Preset, PresetStore, preset_name
 from pixelkit.widgets import DETAIL_ROLE, DropdownComboBox, QuickDestination, ToggleSwitch
 from pixelkit.quick_processing import ENABLED_KEY, FOLDER_KEY, QuickBatch, publish_output, unique_outputs
 from pixelkit.report import BatchReport, FileResult, ReportDialog, human_size
@@ -1026,7 +1026,7 @@ class ImageMagickStudio(QMainWindow):
         self._update_preset_controls()
 
     def _connect_preset_changes(self) -> None:
-        for edit in (self.width_edit, self.height_edit, self.long_side_edit, self.background_edit, self.target_size_edit):
+        for edit in (self.width_edit, self.height_edit, self.long_side_edit, self.scale_edit, self.background_edit, self.target_size_edit):
             edit.textChanged.connect(self._preset_edited)
         for checkbox in (self.keep_ratio, self.strip_metadata, self.target_size_check):
             checkbox.toggled.connect(self._preset_edited)
@@ -1065,10 +1065,11 @@ class ImageMagickStudio(QMainWindow):
     def _apply_image_settings(self, preset: Preset) -> None:
         self.applying_preset = True
         try:
-            self.resize_mode.setCurrentIndex(1 if preset.resize_mode == "longest_side" else 0)
+            self.resize_mode.setCurrentIndex(self.resize_mode.findData(preset.resize_mode))
             self.width_edit.setText(str(preset.width) if preset.width else "")
             self.height_edit.setText(str(preset.height) if preset.height else "")
             self.long_side_edit.setText(str(preset.longest_side) if preset.longest_side else "")
+            self.scale_edit.setText(str(preset.scale_percent))
             self.keep_ratio.setChecked(preset.keep_ratio)
             self.quality_slider.setValue(preset.quality)
             self.strip_metadata.setChecked(preset.strip_metadata)
@@ -1088,12 +1089,13 @@ class ImageMagickStudio(QMainWindow):
         def dimension(edit: QLineEdit) -> int | None:
             return self._integer_value(edit) if edit.text().strip() else None
 
-        longest_side = self.resize_mode.currentIndex() == 1
+        resize_mode = self.resize_mode.currentData()
         return Preset(
-            resize_mode="longest_side" if longest_side else "dimensions",
-            width=None if longest_side else dimension(self.width_edit),
-            height=None if longest_side else dimension(self.height_edit),
-            longest_side=dimension(self.long_side_edit) if longest_side else None,
+            resize_mode=resize_mode,
+            width=dimension(self.width_edit) if resize_mode == "dimensions" else None,
+            height=dimension(self.height_edit) if resize_mode == "dimensions" else None,
+            longest_side=dimension(self.long_side_edit) if resize_mode == "longest_side" else None,
+            scale_percent=self._integer_value(self.scale_edit) if resize_mode == "percentage" and self.scale_edit.text().strip() else 100,
             keep_ratio=self.keep_ratio.isChecked(),
             quality=self.quality_slider.value(), strip_metadata=self.strip_metadata.isChecked(),
             background=self.background_edit.text().strip() or "#ffffff",
@@ -1267,7 +1269,9 @@ class ImageMagickStudio(QMainWindow):
         self.resize_mode = DropdownComboBox(self.colors)
         self.resize_mode.setAccessibleName("Resize mode")
         mode_label.setBuddy(self.resize_mode)
-        self.resize_mode.addItems(["Width × height", "Longest side"])
+        self.resize_mode.addItem("Width × height", "dimensions")
+        self.resize_mode.addItem("Longest side", "longest_side")
+        self.resize_mode.addItem("Percentage", "percentage")
         mode_row.addStretch(1)
         mode_row.addWidget(self.resize_mode)
         layout.addLayout(mode_row)
@@ -1320,6 +1324,29 @@ class ImageMagickStudio(QMainWindow):
         long_side_layout.addWidget(self._field_error_label(self.long_side_edit))
         long_side_layout.addWidget(long_side_note)
         self.resize_stack.addWidget(long_side_page)
+
+        percentage_page = QWidget()
+        percentage_layout = QVBoxLayout(percentage_page)
+        percentage_layout.setContentsMargins(0, 0, 0, 0)
+        percentage_layout.setSpacing(8)
+        percentage_row = QHBoxLayout()
+        percentage_label = QLabel("Scale")
+        self.scale_edit = QLineEdit("100")
+        self.scale_edit.setPlaceholderText("100")
+        self.scale_edit.setValidator(self._integer_validator(1, MAX_SCALE_PERCENT))
+        self.scale_edit.setAccessibleName("Image scale in percent")
+        self.scale_edit.setToolTip(f"1–{MAX_SCALE_PERCENT}%. 50% halves width and height; 100% keeps the original size.")
+        percentage_label.setBuddy(self.scale_edit)
+        percentage_row.addWidget(percentage_label)
+        percentage_row.addWidget(self.scale_edit, 1)
+        percentage_row.addWidget(QLabel("%"))
+        percentage_note = QLabel("Width and height scale proportionally. 100% keeps the original size.")
+        percentage_note.setObjectName("infoLabel")
+        percentage_note.setWordWrap(True)
+        percentage_layout.addLayout(percentage_row)
+        percentage_layout.addWidget(self._field_error_label(self.scale_edit))
+        percentage_layout.addWidget(percentage_note)
+        self.resize_stack.addWidget(percentage_page)
         self.resize_mode.currentIndexChanged.connect(self.resize_stack.setCurrentIndex)
         self.resize_mode.currentIndexChanged.connect(self._clear_field_errors)
         layout.addWidget(self.resize_stack)
@@ -1460,11 +1487,17 @@ class ImageMagickStudio(QMainWindow):
 
     def _validate_processing_fields(self) -> bool:
         self._clear_field_errors()
-        dimensions = [self.long_side_edit] if self.resize_mode.currentIndex() == 1 else [self.width_edit, self.height_edit]
+        dimensions = {
+            "dimensions": [self.width_edit, self.height_edit],
+            "longest_side": [self.long_side_edit],
+            "percentage": [self.scale_edit],
+        }[self.resize_mode.currentData()]
         invalid = []
         for edit in dimensions:
             if edit.text().strip() and not edit.hasAcceptableInput():
-                self._set_field_error(edit, "Use 1–100000 px, or leave empty for the original size.")
+                message = (f"Use 1–{MAX_SCALE_PERCENT}%, or leave empty for the original size." if edit is self.scale_edit else
+                           "Use 1–100000 px, or leave empty for the original size.")
+                self._set_field_error(edit, message)
                 invalid.append(edit)
         if self.target_size_check.isChecked() and not self.target_size_edit.hasAcceptableInput():
             self._set_field_error(self.target_size_edit, "Enter a file-size limit from 1 to 1000000 KiB.")
@@ -1926,7 +1959,11 @@ class ImageMagickStudio(QMainWindow):
 
     def _build_command(self, source: Path, output: Path) -> list[str]:
         command = [self.magick, str(source), "-auto-orient"]
-        if self.resize_mode.currentIndex() == 1:
+        resize_mode = self.resize_mode.currentData()
+        if resize_mode == "percentage":
+            if self.scale_edit.text().strip():
+                command += ["-resize", f"{self._integer_value(self.scale_edit)}%"]
+        elif resize_mode == "longest_side":
             long_side = self.long_side_edit.text().strip()
             if long_side:
                 long_side = str(self._integer_value(self.long_side_edit))

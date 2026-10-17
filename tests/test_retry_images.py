@@ -197,6 +197,16 @@ class ImageRetryTests(unittest.TestCase):
         self.assertFalse(failed.output.parent.exists())
         self.assertEqual(self.preferences.allKeys(), [])
 
+    def test_retry_restores_percentage_from_the_failed_batch(self):
+        failed = self.failure("original.png", output=self.root / "exports" / "scaled.png")
+        settings = Preset(resize_mode="percentage", scale_percent=25, output_format="PNG")
+        report = self.report(failed, settings=settings)
+        self.assertTrue(self.window._retry_failed(report))
+        self.assertEqual(self.window._current_preset(), settings)
+        self.assertEqual(self.window.scale_edit.text(), "25")
+        command = self.window._build_command(failed.source, failed.output)
+        self.assertEqual(command[command.index("-resize") + 1], "25%")
+
     def test_multiple_failures_use_recorded_folder_and_restore_longest_side_settings(self):
         first, second = self.failure("one.png"), self.failure("two.jpg")
         good = self.success("done.png")
